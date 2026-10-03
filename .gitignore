@@ -1,0 +1,60 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+
+# --- 虚拟环境 ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- 测试 / 类型检查 / 格式化缓存 ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# --- Node / 前端 ---
+node_modules/
+.pnpm-store/
+*.tsbuildinfo
+
+# --- 编辑器 / 操作系统 ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- 凭据 / 本地机密 ---
+.env
+.env.*
+*.local.yaml
+
+# --- 本地工具配置(DSH 项目级技能等,仅本机有效) ---
+.dsh/
+
+# --- 临时与调试产物 ---
+*.log
+*.tmp
+.tmp-*/
+
+# --- ComfyUI 运行时目录(体量大且可再生产出,按需取消注释) ---
+# models/
+# output/
+# temp/
+# input/
+# custom_nodes/
+# user/

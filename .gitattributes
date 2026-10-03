@@ -1,0 +1,44 @@
+# 行尾策略
+# 仓库内统一按文本规范化:提交时 CRLF -> LF,索引里始终是 LF。
+# 工作区行尾遵循本机 core.autocrlf 设置(这台机器为 true,即检出时还原为 CRLF)。
+# 若希望工作区也固定为 LF,执行:
+#     git config core.autocrlf false
+#     git rm --cached -r . && git reset --hard
+* text=auto
+
+# 二进制资产:禁止行尾转换与文本 diff,避免损坏
+*.png          binary
+*.jpg          binary
+*.jpeg         binary
+*.gif          binary
+*.webp         binary
+*.ico          binary
+*.bmp          binary
+*.tiff         binary
+*.mp3          binary
+*.wav          binary
+*.flac         binary
+*.ogg          binary
+*.mp4          binary
+*.webm         binary
+*.mov          binary
+*.avi          binary
+*.safetensors  binary
+*.ckpt         binary
+*.pt           binary
+*.pth          binary
+*.bin          binary
+*.onnx         binary
+*.gguf         binary
+*.zip          binary
+*.7z           binary
+*.gz           binary
+*.tar          binary
+*.woff         binary
+*.woff2        binary
+
+# 锁文件不参与 diff 与合并冲突
+package-lock.json  -diff -merge
+pnpm-lock.yaml     -diff -merge
+uv.lock            -diff -merge
+poetry.lock        -diff -merge
