@@ -1,0 +1,10 @@
+[project]
+name = "comfyui-mesh-trimesh"
+version = "0.1.0"
+description = "ComfyUI nodes converting between the native MESH type and trimesh geometry"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = ["trimesh>=4.0.0"]
+
+[tool.comfy]
+# PublisherId = "your-publisher-id"
