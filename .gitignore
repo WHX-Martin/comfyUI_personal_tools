@@ -43,8 +43,9 @@ desktop.ini
 .env.*
 *.local.yaml
 
-# --- 本地工具配置(DSH 项目级技能等,仅本机有效) ---
+# --- 本地工具配置(DSH / WorkBuddy 项目级技能等,仅本机有效) ---
 .dsh/
+.workbuddy/
 
 # --- 临时与调试产物 ---
 *.log

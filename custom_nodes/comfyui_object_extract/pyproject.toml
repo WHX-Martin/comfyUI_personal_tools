@@ -1,0 +1,10 @@
+[project]
+name = "comfyui-object-extract"
+version = "1.0.0"
+description = "Extract several objects from a scene: VLM reply -> bounding boxes -> per-object prompts and coarse masks"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.comfy]
+# PublisherId = "your-publisher-id"
