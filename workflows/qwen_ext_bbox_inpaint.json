@@ -1,0 +1,1387 @@
+{
+  "id": "b7e4c1a8-52d9-4f13-8c6e-qwen21maskinpaint",
+  "revision": 2,
+  "last_node_id": 33,
+  "last_link_id": 47,
+  "nodes": [
+    {
+      "id": 15,
+      "type": "MarkdownNote",
+      "pos": [
+        -1420,
+        0
+      ],
+      "size": [
+        470,
+        1340
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "使用说明",
+      "properties": {
+        "Node name for S&R": "MarkdownNote"
+      },
+      "widgets_values": [
+        "## ★ 外部模型版（粗遮罩路线 · 不含 SAM3）\n\n识图这一步**搬出了 ComfyUI**：不再在本机跑 Qwen3-VL，\n而是把图发给任意多模态模型，把它的回复**粘进 ③ 文字框**。\n后面的「框当粗遮罩 → 裁剪 → Qwen 分离」一个字都没改。\n\n```\nLoadImage ─┬→ ③ 文字框（粘贴外部模型的回复，JSON）      ← 原来这里是 TextGenerate\n           │                ↓\n           │     ③-1 「Object Prompts from VLM」解析节点 → 边界框\n           │                ↓\n           │     ③-4 「BBoxes to Masks」把每个框画成实心矩形\n           │                ├─ masks   → 掩码批→列表 → 裁到框 → Qwen 分离\n           │                ├─ prompts → 每框一句「分离出这个物体」\n           │                └─ report  → 预览\n           └──────────────────────────────────────────────→ 原图（裁剪用）\n```\n\n### 三步用法\n\n1. 把 `输入图像` 里那张图发给外部多模态模型，附上下面的提示词。\n2. 把它回复的 JSON 粘进 **③ 文字框**（自带一份 `pineapple.webp` 的真实示例）。\n3. Queue。\n\n> 图就在 ComfyUI 的 `input/` 目录里（桌面版为 `ComfyUI-data/input/`），\n> `输入图像` 下拉框显示的文件名就是。\n\n### 给外部模型的提示词（复制这段）\n\n```\nList every distinct object in this image that could be cut out and repainted.\nReply with JSON only, no prose, no markdown:\n[{\"name\": \"object\", \"bbox\": [x1, y1, x2, y2]}]\n- name: singular lowercase English noun, 1-3 common words\n- bbox: [left, top, right, bottom] in pixels of this image\n- list each object once; never repeat a box\n- cover every object you can see; stop when you are done\nReply:\n```\n\n### 期望的回复格式\n\n```json\n[\n  {\"name\": \"pineapple\", \"bbox\": [250, 44, 622, 968]},\n  {\"name\": \"cut half\", \"bbox\": [398, 648, 792, 998]}\n]\n```\n\n宽容度很高：``` 围栏、多一层嵌套、尾随逗号都能救；`bbox` 写成\n`{\"x\":,\"y\":,\"width\":,\"height\":}` 也行；0–1000 的归一化坐标会自动换算。\n\n**③-2** 是原始回复，**③-3** 是解析结果，**③-5** 是每个框的面积占比和渲染出的提示词。\n\n### 名字怎么起（这一版和 SAM3 版不同）\n\n这里的名字**不喂给任何分割器**，它只做两件事：\n\n1. 按框顺序给每个裁剪结果配一句提示词 —— 模板里 `{name}` 会被替换成该框的名字\n2. 写在 ③-5 的 report 里，方便你核对第 i 个框是什么\n\n所以**不会出现「两个名字撞了导致重复遮罩」的问题**，每个框各配各的。\n名字要短、要具体，因为它是唯一告诉 Qwen「从这堆像素里挑哪个」的线索：\n\n| 名字 | 效果 |\n|---|---|\n| `pineapple` | ✅ 明确 |\n| `cut half` | ✅ 明确（比 `half of pineapple` 好） |\n| `object`、`thing`、`item` | ❌ 什么也没告诉模型 |\n\n> 想让所有框共用同一句提示词，把模板里的 `{name}` 删掉即可。\n\n### ★ 背景是品红/黑色，不是出错\n\n- **黑底**来自 `裁到粗遮罩` 的 `background` 参数（默认 `#000000`），是裁剪阶段的抠底色\n- 出图后 Qwen 会自己决定背景。实测它偏爱**品红**（抠图底色），这是模型行为，不是 bug\n- 别在提示词里跟背景较劲：强求 `pure white studio background` 反而会让它\n  **把框里的杂物一起保住**，分离质量下降。让它「去掉别的东西」就够了\n- **`cfg = 1` ⇒ 负向提示词逐像素无效**（无分类器引导），写了等于没写\n\n### 兜底\n\n回复解析不出任何框时，`BBoxes to Masks` 的 `if_empty = full_image` 会退回\n「一整张全图遮罩」，图还是能跑出来（只是等于整图重绘一次）。\n想让它干脆什么都不做，改成 `none`。\n\n### 需要的模型\n\n| 文件 | 放到哪里 | 这一版还用吗 |\n|---|---|---|\n| `qwen_image_2.1_int8_convrot.safetensors` | `models/diffusion_models/` | ✅ 重绘 |\n| `qwen3vl_8b_int8_convrot.safetensors` | `models/text_encoders/` | ✅ 但只当文本编码器用 |\n| `qwen_image_2.1_vae_bf16.safetensors` | `models/vae/` | ✅ |\n| `sam3.1_multiplex_fp16.safetensors` | `models/checkpoints/` | ❌ 本版不用 |\n\n> 桌面版实际都在共享库：`ComfyUI-Desktop/ComfyUI-Shared/models`\n>\n> **别被 `qwen3vl` 这个名字骗了**：它在这里只负责把重绘提示词编码成条件向量\n> （`CLIPLoader` 的 `type` 必须是 `qwen_image`），跟「识图」没关系了。\n\n### 调参 / 排错\n\n- **想多留点周围环境**：把 `BBoxes to Masks` 的 `grow` 调大（正数外扩）\n- **框太松、混进杂物**：`grow` 给负数内缩\n- **物体被裁掉一半**：调大 `Crop Image to Mask` 的 `pad_factor`（1.0~2.0）\n- **一张图不想跑太多次**：`BBoxes to Masks` 的 `limit` 设上限\n- **显存吃紧**：UNET 6.8G + 文本编码器 8.8G，框越多越慢\n\n### 相关版本\n\n| 想干什么 | 用哪个 |\n|---|---|\n| 全自动（本地 Qwen3-VL 识图） | `qwen_vlm_bbox_inpaint.json` |\n| 外部模型给文本 + **SAM3 精确遮罩** | `sam3_text_mask_inpaint_ext.json` |\n| 完全手写、不用框 | `sam3_text_mask_inpaint.json` |\n\n自定解析 / 遮罩节点的源码：`comfyUI_tools/custom_nodes/comfyui_object_extract/`\n"
+      ],
+      "widgets_values_named": {
+        "text": "## 文字 → 多物体遮罩 → **Qwen-Image 2.1** 逐个重绘\n\n### 需要的模型\n\n| 文件 | 放到哪里 |\n|---|---|\n| `sam3.1_multiplex_fp16.safetensors` | `models/checkpoints/` |\n| `qwen_image_2.1_int8_convrot.safetensors` | `models/diffusion_models/` |\n| `qwen3vl_8b_int8_convrot.safetensors` | `models/text_encoders/` |\n| `qwen_image_2.1_vae_bf16.safetensors` | `models/vae/` |\n\n> 桌面版实际都放在共享库：`ComfyUI-Desktop/ComfyUI-Shared/models`\n\n---\n\n### 这一版改了什么\n\n重绘引擎从 **Stable Diffusion 1.5** 换成 **Qwen-Image 2.1**（沿用参考工作流的接法）：\n\n| | 旧（SD1.5） | 新（Qwen-Image 2.1） |\n|---|---|---|\n| 模型加载 | 1 个 Checkpoint | `UNETLoader` + `CLIPLoader` + `VAELoader` 三件套 |\n| 文本编码 | `CLIPTextEncode` | `TextEncodeQwenImage21`（带参考图，走编辑语义） |\n| 掩码用法 | `VAEEncodeForInpaint` 写入 noise mask | **裁到掩码 bbox** → 当参考图交给 Qwen 重画 |\n| 执行方式 | image[N]×mask[N] 批量对齐，一次采样 | 掩码批转列表，**逐张依次重绘**，N 次独立采样 |\n| 结果 | 原图局部被替换 | 每个物体一张 1024×1024 重绘结果 |\n\n### 怎么用\n\n1. **① 文字框**写要找的物体，用 `:N` 限定每个类别最多几个：\n\n```\npineapple:2\n```\n\n2. **② 重绘提示词**（`Text Encode Qwen Image 2.1` 的 prompt）只写一次，所有遮罩共用。\n   想让不同物体换不同说法，就分几次跑、每次 `:N` 只留一个。\n\n3. 直接 Queue。N 个物体依次各重绘一张，输出 `sam3_qwen_inpaint_00001_.png` … `_0000N_`。\n\n### 执行链路\n\n```\nLoadImage ─┬→ SAM3 Detect (individual_masks=ON) → masks [N,H,W]\n           │        ├→ Mask Preview                     先肉眼确认选对了\n           │        └→ Mask Batch to Mask List          → [mask_0, mask_1, ...] 每张 [1,H,W]\n           └────────────────────────────┐\n                                        ↓\n                        ImageCropToMask(原图, mask_i)   裁到 bbox、抠底、缩到 1024²\n                                        ↓  ★ 列表广播：下面整段按物体逐个跑\n        TextEncodeQwenImage21(clip, prompt, 参考图=crop_i, vae)\n                                        ↓  → positive / negative / latent\n        QwenImage21Cache(UNET) → KSampler → VAEDecode → SaveImage + PreviewImage\n```\n\n**关键机制**：`Mask Batch to Mask List` 把掩码批切成 N 个单项，\nComfyUI 对**列表输入**会自动逐个执行下游节点（非列表输入自动重复）。\n所以后续每个节点都执行 N 次、每次只处理一个物体 ——\n不需要循环节点，且每个物体是**独立的采样**，互不干扰。\n\n### 调参 / 排错\n\n- **选不到物体**：`threshold` 从 0.5 降到 0.3\n- **边缘不够贴**：`refine_iterations` 从 2 提到 3~4\n- **物体被裁掉一半**：调大 `Crop Image to Mask` 的 `pad_factor`（1.0~2.0，越大留白越多）\n- **想多留点周围环境**：把 `grow_mask` 调大，或把 `background` 改成图片主色\n- **背景是黑的**：正常 —— 裁剪阶段会抠底成纯色，Qwen 只重画物体本身\n- **显存吃紧**：Qwen-Image 2.1 比 SD1.5 重得多（UNET 6.8G + 文本编码器 8.8G），\n  N 越大越慢；把 `:N` 调小\n- **`cfg` 保持 1**：Qwen-Image 2.1 是蒸馏模型，cfg > 1 会画崩\n- **想改回文生图**：把 `Switch` 拨到 true，改走 `Empty Latent Image`\n\n### 依赖\n\n- `Mask Batch to Mask List` 来自 **ComfyUI-Impact-Pack**（本机已安装）\n- 其余全部是 ComfyUI 核心节点（含 `Crop Image to Mask`、`Text Encode Qwen Image 2.1`）\n\n\n---\n\n## 🆕 自动识别（无需再手写物体列表）\n\n`① 文字` 不再需要手填 —— 工作流会先把原图交给 **Qwen3-VL** 识图，\n让它自己判断图里有哪些物体、各有几个，输出 `物体:个数` 形式，自动喂给 SAM3。\n\n### 新增链路\n\n```\nLoadImage ─┬→ SAM3 Detect\n           └→ TextGenerate（clip = Qwen3-VL，image = 原图，prompt = 识图指令）\n                   ↓ generated_text          例：apple:2, banana:1\n              RegexReplace ×3 + StringTrim   清洗成严格的「名称:数字」逗号列表\n                   ├→ PreviewTextNode         看 AI 原始输出，方便排查\n                   └→ StringCompare(==\"\") → Text Input Switch\n                                                   ├ text_a ← ⑤ 手动兜底文字\n                                                   └ text_b ← 清洗后的 AI 结果\n                                                        ↓\n                                            CLIPTextEncode.text → SAM3 Detect\n```\n\n### 三个要点\n\n1. **用的是本地模型**：就是工作流里已有的 `qwen3vl_8b_int8_convrot.safetensors`\n   （`CLIPLoader` 的 `type` 必须是 `qwen_image`）。不用额外下模型、不用 API key。\n2. **SAM3 的文本语法是逗号分隔**（`comfy/text_encoders/sam3_clip.py::_parse_prompts`）：\n   `物体A:2, 物体B:1`。**不是换行分隔**。每段还受 CLIP 32 token 上限约束，\n   所以物体名要短（1–3 个单词），别写长句子。\n3. **兜底**：AI 可能返回空（实测复杂图片会出现）。此时 `StringCompare` 判空为真，\n   自动切到 ⑤ 的手动文字；想全程手动，把 ⑤ 填好即可。\n\n### 想调什么\n\n| 目的 | 改哪里 |\n|---|---|\n| 识别更准/更少 | `③ 识图 AI` 的 `prompt`（已内置格式约束与示例） |\n| 输出更随机/更稳定 | `sampling_mode`：`on` 带温度，`off` 是贪心 |\n| 物体名太长被截断 | 在 prompt 里强调「1-3 words」 |\n| 清洗规则 | `④-1 ~ ④-4` 四个 RegexReplace |\n"
+      }
+    },
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [
+        -880,
+        140
+      ],
+      "size": [
+        400,
+        420
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            8,
+            40,
+            42
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "title": "输入图像",
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "pineapple.webp",
+        "image"
+      ],
+      "widgets_values_named": {
+        "image": "pineapple.webp",
+        "upload": "image"
+      }
+    },
+    {
+      "id": 5,
+      "type": "MaskPreview",
+      "pos": [
+        -40,
+        -20
+      ],
+      "size": [
+        330,
+        340
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 43
+        }
+      ],
+      "outputs": [
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "title": "预览：粗遮罩（矩形，先看框选对了没）",
+      "properties": {
+        "Node name for S&R": "MaskPreview"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 16,
+      "type": "MasksToMaskList",
+      "pos": [
+        -40,
+        360
+      ],
+      "size": [
+        330,
+        80
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "masks",
+          "type": "MASK",
+          "link": 44
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": [
+            7
+          ]
+        }
+      ],
+      "title": "粗遮罩批 → 列表（每项 [1,H,W]，驱动逐项执行）",
+      "properties": {
+        "Node name for S&R": "MasksToMaskList",
+        "cnr_id": "comfyui-impact-pack"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 6,
+      "type": "UNETLoader",
+      "pos": [
+        380,
+        240
+      ],
+      "size": [
+        460,
+        90
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            9
+          ]
+        }
+      ],
+      "title": "Qwen-Image 2.1 UNET",
+      "properties": {
+        "Node name for S&R": "UNETLoader",
+        "models": [
+          {
+            "name": "qwen_image_2.1_int8_convrot.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+            "directory": "diffusion_models"
+          }
+        ]
+      },
+      "widgets_values": [
+        "qwen_image_2.1_int8_convrot.safetensors",
+        "default"
+      ],
+      "widgets_values_named": {
+        "unet_name": "qwen_image_2.1_int8_convrot.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    {
+      "id": 7,
+      "type": "QwenImage21Cache",
+      "pos": [
+        380,
+        370
+      ],
+      "size": [
+        460,
+        90
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            10
+          ]
+        }
+      ],
+      "title": "Qwen 2.1 KV 缓存",
+      "properties": {
+        "Node name for S&R": "QwenImage21Cache"
+      },
+      "widgets_values": [
+        "auto",
+        "default"
+      ],
+      "widgets_values_named": {
+        "device": "auto",
+        "dtype": "default"
+      }
+    },
+    {
+      "id": 8,
+      "type": "CLIPLoader",
+      "pos": [
+        380,
+        490
+      ],
+      "size": [
+        460,
+        120
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            11
+          ]
+        }
+      ],
+      "title": "Qwen-Image 2.1 文本编码器（qwen3vl 权重，但不做识图）",
+      "properties": {
+        "Node name for S&R": "CLIPLoader",
+        "models": [
+          {
+            "name": "qwen3vl_8b_int8_convrot.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+            "directory": "text_encoders"
+          }
+        ]
+      },
+      "widgets_values": [
+        "qwen3vl_8b_int8_convrot.safetensors",
+        "qwen_image",
+        "default"
+      ],
+      "widgets_values_named": {
+        "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+        "type": "qwen_image",
+        "device": "default"
+      }
+    },
+    {
+      "id": 9,
+      "type": "VAELoader",
+      "pos": [
+        380,
+        640
+      ],
+      "size": [
+        460,
+        70
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            12,
+            20
+          ]
+        }
+      ],
+      "title": "Qwen-Image 2.1 VAE",
+      "properties": {
+        "Node name for S&R": "VAELoader",
+        "models": [
+          {
+            "name": "qwen_image_2.1_vae_bf16.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors",
+            "directory": "vae"
+          }
+        ]
+      },
+      "widgets_values": [
+        "qwen_image_2.1_vae_bf16.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+      }
+    },
+    {
+      "id": 17,
+      "type": "ImageCropToMask",
+      "pos": [
+        380,
+        -20
+      ],
+      "size": [
+        330,
+        190
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 8
+        },
+        {
+          "name": "masks",
+          "type": "MASK",
+          "link": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            13
+          ]
+        }
+      ],
+      "title": "裁到粗遮罩 bbox + 抠底 + 缩到 1024²（逐张）",
+      "properties": {
+        "Node name for S&R": "ImageCropToMask"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        1,
+        0,
+        "#000000"
+      ],
+      "widgets_values_named": {
+        "width": 1024,
+        "height": 1024,
+        "pad_factor": 1,
+        "grow_mask": 0,
+        "background": "#000000"
+      }
+    },
+    {
+      "id": 10,
+      "type": "TextEncodeQwenImage21",
+      "pos": [
+        880,
+        -20
+      ],
+      "size": [
+        470,
+        430
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 11
+        },
+        {
+          "name": "images.image_1",
+          "type": "IMAGE",
+          "link": 13,
+          "shape": 7
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 12,
+          "shape": 7
+        },
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "link": 45,
+          "widget": {
+            "name": "prompt"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "links": [
+            14
+          ]
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "links": [
+            15
+          ]
+        },
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "links": [
+            16
+          ]
+        }
+      ],
+      "title": "② 分离重绘：Qwen-Image 2.1 编码（参考图 = 粗遮罩裁剪，提示词逐物体）",
+      "properties": {
+        "Node name for S&R": "TextEncodeQwenImage21"
+      },
+      "widgets_values": [
+        "isolate the single {name}, remove the background and everything else, keep its original shape, colour and texture",
+        "",
+        1024
+      ],
+      "widgets_values_named": {
+        "prompt": "isolate the single {name}, remove the background and everything else, keep its original shape, colour and texture",
+        "negative_prompt": "",
+        "resolution": 1024
+      }
+    },
+    {
+      "id": 11,
+      "type": "EmptyLatentImage",
+      "pos": [
+        880,
+        440
+      ],
+      "size": [
+        330,
+        120
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            17
+          ]
+        }
+      ],
+      "title": "空 latent（Switch 拨到 true 时用）",
+      "properties": {
+        "Node name for S&R": "EmptyLatentImage"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        1
+      ],
+      "widgets_values_named": {
+        "width": 1024,
+        "height": 1024,
+        "batch_size": 1
+      }
+    },
+    {
+      "id": 12,
+      "type": "ComfySwitchNode",
+      "pos": [
+        880,
+        590
+      ],
+      "size": [
+        330,
+        80
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "on_false",
+          "type": "LATENT",
+          "link": 16,
+          "shape": 7
+        },
+        {
+          "name": "on_true",
+          "type": "LATENT",
+          "link": 17,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "LATENT",
+          "links": [
+            18
+          ]
+        }
+      ],
+      "title": "Switch：false = 用参考图，true = 纯空 latent",
+      "properties": {
+        "Node name for S&R": "ComfySwitchNode"
+      },
+      "widgets_values": [
+        false
+      ],
+      "widgets_values_named": {
+        "switch": false
+      }
+    },
+    {
+      "id": 13,
+      "type": "KSampler",
+      "pos": [
+        1390,
+        -20
+      ],
+      "size": [
+        280,
+        280
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 10
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 14
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 15
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 18
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            19
+          ]
+        }
+      ],
+      "title": "KSampler：每个物体独立采样",
+      "properties": {
+        "Node name for S&R": "KSampler"
+      },
+      "widgets_values": [
+        623874510293,
+        "randomize",
+        25,
+        1,
+        "euler",
+        "simple",
+        1
+      ],
+      "widgets_values_named": {
+        "seed": 623874510293,
+        "control_after_generate": "randomize",
+        "steps": 25,
+        "cfg": 1,
+        "sampler_name": "euler",
+        "scheduler": "simple",
+        "denoise": 1
+      }
+    },
+    {
+      "id": 14,
+      "type": "VAEDecode",
+      "pos": [
+        1410,
+        330
+      ],
+      "size": [
+        230,
+        60
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 19
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 20
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            21,
+            22
+          ]
+        }
+      ],
+      "title": "VAE Decode",
+      "properties": {
+        "Node name for S&R": "VAEDecode"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 18,
+      "type": "PreviewImage",
+      "pos": [
+        1720,
+        -20
+      ],
+      "size": [
+        300,
+        380
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 21
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "预览：每个物体的重绘结果",
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 19,
+      "type": "SaveImage",
+      "pos": [
+        1720,
+        400
+      ],
+      "size": [
+        400,
+        450
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 22
+        }
+      ],
+      "outputs": [],
+      "title": "保存 N 张（按框顺序编号）",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "ext_object_sep"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "sam3_qwen_inpaint"
+      }
+    },
+    {
+      "id": 33,
+      "type": "PrimitiveStringMultiline",
+      "pos": [
+        -940,
+        850
+      ],
+      "size": [
+        620,
+        330
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "value",
+          "type": "STRING",
+          "widget": {
+            "name": "value"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            34,
+            47
+          ]
+        }
+      ],
+      "title": "③ 外部多模态模型的回复（把 JSON 粘到这里）",
+      "properties": {
+        "Node name for S&R": "PrimitiveStringMultiline",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [
+        "[\n  {\"name\": \"pineapple\", \"bbox\": [250, 44, 622, 968]},\n  {\"name\": \"cut half\", \"bbox\": [398, 648, 792, 998]}\n]"
+      ],
+      "widgets_values_named": {
+        "value": "[\n  {\"name\": \"pineapple\", \"bbox\": [250, 44, 622, 968]},\n  {\"name\": \"cut half\", \"bbox\": [398, 648, 792, 998]}\n]"
+      }
+    },
+    {
+      "id": 28,
+      "type": "PreviewTextNode",
+      "pos": [
+        480,
+        1170
+      ],
+      "size": [
+        330,
+        140
+      ],
+      "flags": {},
+      "order": 28,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "link": 34
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "③-2 查看：粘进来的原始回复",
+      "properties": {
+        "Node name for S&R": "PreviewTextNode",
+        "cnr_id": "ComfyUI_Custom_Nodes_AlekPet"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 29,
+      "type": "ObjectExtract_PromptsFromVLM",
+      "pos": [
+        -200,
+        830
+      ],
+      "size": [
+        410,
+        320
+      ],
+      "flags": {},
+      "order": 29,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "link": 47,
+          "widget": {
+            "name": "text"
+          }
+        },
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 40
+        },
+        {
+          "name": "coord_mode",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "coord_mode"
+          }
+        },
+        {
+          "name": "box_format",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "box_format"
+          }
+        },
+        {
+          "name": "pad",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "pad"
+          }
+        },
+        {
+          "name": "min_size",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "min_size"
+          }
+        },
+        {
+          "name": "dedupe",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "dedupe"
+          }
+        },
+        {
+          "name": "count_cap",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "count_cap"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "name": "bboxes",
+          "type": "BOUNDING_BOX",
+          "links": [
+            41
+          ]
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": [
+            39
+          ]
+        }
+      ],
+      "title": "③-1 解析：外部模型回复 → 边界框",
+      "properties": {
+        "Node name for S&R": "ObjectExtract_PromptsFromVLM"
+      },
+      "widgets_values": [
+        "",
+        "auto",
+        "auto",
+        0,
+        4,
+        true,
+        20
+      ],
+      "widgets_values_named": {
+        "text": "",
+        "coord_mode": "auto",
+        "box_format": "auto",
+        "pad": 0,
+        "min_size": 4,
+        "dedupe": true,
+        "count_cap": 20
+      }
+    },
+    {
+      "id": 30,
+      "type": "PreviewTextNode",
+      "pos": [
+        -200,
+        1190
+      ],
+      "size": [
+        410,
+        210
+      ],
+      "flags": {},
+      "order": 30,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "link": 39
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "③-3 查看：解析结果（框 / 坐标 / 去重）",
+      "properties": {
+        "Node name for S&R": "PreviewTextNode"
+      },
+      "widgets_values": [],
+      "widgets_values_named": {}
+    },
+    {
+      "id": 31,
+      "type": "ObjectExtract_BBoxesToMasks",
+      "pos": [
+        -40,
+        1440
+      ],
+      "size": [
+        430,
+        420
+      ],
+      "flags": {},
+      "order": 31,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "bboxes",
+          "type": "BOUNDING_BOX",
+          "link": 41
+        },
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 42
+        },
+        {
+          "name": "width",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "width"
+          }
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "height"
+          }
+        },
+        {
+          "name": "grow",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "grow"
+          }
+        },
+        {
+          "name": "min_size",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "min_size"
+          }
+        },
+        {
+          "name": "limit",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "limit"
+          }
+        },
+        {
+          "name": "if_empty",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "if_empty"
+          }
+        },
+        {
+          "name": "prompt_template",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "prompt_template"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "masks",
+          "type": "MASK",
+          "links": [
+            43,
+            44
+          ]
+        },
+        {
+          "name": "prompts",
+          "type": "STRING",
+          "links": [
+            45
+          ]
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": [
+            46
+          ]
+        }
+      ],
+      "title": "③-4 框 → 粗遮罩（每个框一个实心矩形）+ 逐框提示词",
+      "properties": {
+        "Node name for S&R": "ObjectExtract_BBoxesToMasks"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        0,
+        8,
+        0,
+        "full_image",
+        "isolate the single {name}, remove the background and everything else, keep its original shape, colour and texture"
+      ],
+      "widgets_values_named": {
+        "width": 1024,
+        "height": 1024,
+        "grow": 0,
+        "min_size": 8,
+        "limit": 0,
+        "if_empty": "full_image",
+        "prompt_template": "isolate the single {name}, remove the background and everything else, keep its original shape, colour and texture"
+      }
+    },
+    {
+      "id": 32,
+      "type": "PreviewTextNode",
+      "pos": [
+        480,
+        1440
+      ],
+      "size": [
+        400,
+        300
+      ],
+      "flags": {},
+      "order": 32,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "link": 46
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "③-5 查看：框大小 / 面积占比 / 渲染出的提示词",
+      "properties": {
+        "Node name for S&R": "PreviewTextNode"
+      },
+      "widgets_values": [],
+      "widgets_values_named": {}
+    }
+  ],
+  "links": [
+    [
+      7,
+      16,
+      0,
+      17,
+      1,
+      "MASK"
+    ],
+    [
+      8,
+      1,
+      0,
+      17,
+      0,
+      "IMAGE"
+    ],
+    [
+      9,
+      6,
+      0,
+      7,
+      0,
+      "MODEL"
+    ],
+    [
+      10,
+      7,
+      0,
+      13,
+      0,
+      "MODEL"
+    ],
+    [
+      11,
+      8,
+      0,
+      10,
+      0,
+      "CLIP"
+    ],
+    [
+      12,
+      9,
+      0,
+      10,
+      2,
+      "VAE"
+    ],
+    [
+      13,
+      17,
+      0,
+      10,
+      1,
+      "IMAGE"
+    ],
+    [
+      14,
+      10,
+      0,
+      13,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      15,
+      10,
+      1,
+      13,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      16,
+      10,
+      2,
+      12,
+      0,
+      "LATENT"
+    ],
+    [
+      17,
+      11,
+      0,
+      12,
+      1,
+      "LATENT"
+    ],
+    [
+      18,
+      12,
+      0,
+      13,
+      3,
+      "LATENT"
+    ],
+    [
+      19,
+      13,
+      0,
+      14,
+      0,
+      "LATENT"
+    ],
+    [
+      20,
+      9,
+      0,
+      14,
+      1,
+      "VAE"
+    ],
+    [
+      21,
+      14,
+      0,
+      18,
+      0,
+      "IMAGE"
+    ],
+    [
+      22,
+      14,
+      0,
+      19,
+      0,
+      "IMAGE"
+    ],
+    [
+      34,
+      33,
+      0,
+      28,
+      0,
+      "STRING"
+    ],
+    [
+      39,
+      29,
+      2,
+      30,
+      0,
+      "STRING"
+    ],
+    [
+      40,
+      1,
+      0,
+      29,
+      1,
+      "IMAGE"
+    ],
+    [
+      41,
+      29,
+      1,
+      31,
+      0,
+      "BOUNDING_BOX"
+    ],
+    [
+      42,
+      1,
+      0,
+      31,
+      1,
+      "IMAGE"
+    ],
+    [
+      43,
+      31,
+      0,
+      5,
+      0,
+      "MASK"
+    ],
+    [
+      44,
+      31,
+      0,
+      16,
+      0,
+      "MASK"
+    ],
+    [
+      45,
+      31,
+      1,
+      10,
+      3,
+      "STRING"
+    ],
+    [
+      46,
+      31,
+      2,
+      32,
+      0,
+      "STRING"
+    ],
+    [
+      47,
+      33,
+      0,
+      29,
+      0,
+      "STRING"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "① 输入图",
+      "bounding": [
+        -940,
+        -120,
+        480,
+        900
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "② Qwen-Image 2.1：逐物体分离重绘（SAM3 已移除）",
+      "bounding": [
+        -460,
+        -120,
+        2660,
+        1000
+      ],
+      "color": "#a1309b",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "③ 外部多模态模型给边界框 → 粗遮罩（不再在本机识图）",
+      "bounding": [
+        -940,
+        800,
+        1900,
+        1200
+      ],
+      "color": "#88A",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.55,
+      "offset": [
+        900,
+        400
+      ]
+    },
+    "frontendVersion": "1.53.6"
+  },
+  "version": 0.4
+}

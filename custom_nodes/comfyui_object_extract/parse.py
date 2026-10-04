@@ -20,6 +20,7 @@ __all__ = [
     "dedupe_boxes",
     "normalize_boxes",
     "fit_boxes",
+    "rescale_boxes",
     "render_prompt",
     "try_load_json",
     "extract_json_blobs",
@@ -642,6 +643,33 @@ def fit_boxes(boxes, width: int, height: int, grow: int = 0, min_size: int = 1,
         if limit and len(out) >= limit:
             break
     return out
+
+
+def rescale_boxes(boxes, names, sx: float, sy: float,
+                  width: int, height: int):
+    """Map boxes from one image size onto another, dropping any that collapse.
+
+    This exists because a vision API may be handed a *downscaled* copy of the
+    image (to save tokens) while everything downstream still works in the
+    original's pixel space. The model faithfully reports coordinates of the
+    picture it saw, so without this the boxes land in the wrong place -- silently,
+    and only visible three nodes later as a mask over the wrong region.
+
+    ``names`` is filtered in lockstep: a dropped box must not shift the labels of
+    the boxes after it.
+    """
+    out_boxes: list[dict] = []
+    out_names: list[str] = []
+    for box, name in zip(boxes, names):
+        x0 = max(0, min(int(round(box["x"] * sx)), width))
+        y0 = max(0, min(int(round(box["y"] * sy)), height))
+        x1 = max(0, min(int(round((box["x"] + box["width"]) * sx)), width))
+        y1 = max(0, min(int(round((box["y"] + box["height"]) * sy)), height))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        out_boxes.append(dict(box, x=x0, y=y0, width=x1 - x0, height=y1 - y0))
+        out_names.append(name)
+    return out_boxes, out_names
 
 
 def render_prompt(template: str, label: str = "") -> str:

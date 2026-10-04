@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-object-extract"
-version = "1.0.0"
-description = "Extract several objects from a scene: VLM reply -> bounding boxes -> per-object prompts and coarse masks"
+version = "1.1.0"
+description = "Extract several objects from a scene: query a vision model (OpenAI-compatible), parse its reply into per-object prompts and bounding boxes, and paint coarse masks"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = []
