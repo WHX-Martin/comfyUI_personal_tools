@@ -1,8 +1,8 @@
 {
   "id": "b7e4c1a8-52d9-4f13-8c6e-vlmqueryinpaint",
   "revision": 2,
-  "last_node_id": 32,
-  "last_link_id": 40,
+  "last_node_id": 33,
+  "last_link_id": 42,
   "nodes": [
     {
       "id": 15,
@@ -529,7 +529,7 @@
           "name": "images",
           "type": "IMAGE",
           "links": [
-            13
+            41
           ]
         }
       ],
@@ -575,7 +575,7 @@
         {
           "name": "images.image_1",
           "type": "IMAGE",
-          "link": 13,
+          "link": 42,
           "shape": 7
         },
         {
@@ -1256,6 +1256,57 @@
       },
       "widgets_values": [],
       "widgets_values_named": {}
+    },
+    {
+      "id": 33,
+      "type": "ImageDeduplication",
+      "pos": [
+        770,
+        -20
+      ],
+      "size": [
+        330,
+        82
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 41
+        },
+        {
+          "name": "similarity_threshold",
+          "type": "FLOAT",
+          "widget": {
+            "name": "similarity_threshold"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            42
+          ],
+          "slot_index": 0
+        }
+      ],
+      "title": "去重：裁到同一物体的多张图只留一张",
+      "properties": {
+        "Node name for S&R": "ImageDeduplication",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.0"
+      },
+      "widgets_values": [
+        0.95
+      ],
+      "color": "#223",
+      "bgcolor": "#335"
     }
   ],
   "links": [
@@ -1354,14 +1405,6 @@
       10,
       2,
       "VAE"
-    ],
-    [
-      13,
-      17,
-      0,
-      10,
-      1,
-      "IMAGE"
     ],
     [
       14,
@@ -1473,6 +1516,22 @@
       0,
       32,
       0,
+      "IMAGE"
+    ],
+    [
+      41,
+      17,
+      0,
+      33,
+      0,
+      "IMAGE"
+    ],
+    [
+      42,
+      33,
+      0,
+      10,
+      1,
       "IMAGE"
     ]
   ],
