@@ -1,0 +1,2400 @@
+{
+  "id": "ba4c4afe-18e0-5277-98e2-670946cd62af",
+  "revision": 0,
+  "last_node_id": 43,
+  "last_link_id": 49,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "MarkdownNote",
+      "pos": [
+        -2982.933236239998,
+        92.84104618
+      ],
+      "size": [
+        560,
+        2100
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "读我 · 为什么用模型生成、参数怎么调",
+      "properties": {
+        "Node name for S&R": "MarkdownNote"
+      },
+      "widgets_values": [
+        "# 完整 PBR 贴图 · StableMaterials 版（模型生成，非派生）\n\n左半段和 `sdxl_sand_pbr_seamless.json` 一样：SDXL + 沙砾 LoRA，靠**改采样 padding**\n出数学上四方连续的 albedo @1024。右半段把 albedo 降到 512 交给 **StableMaterials**\n（Vecchio et al., CVPR 2026, arXiv 2406.09293），一次前向得到 **5 张严格对齐**的\nbasecolor / normal / height / roughness / metallic，再放大回 1024。\n\n## 为什么值得换成模型生成\n\n派生链（`pbr.py`）的 roughness 是从 **albedo 亮度**推的，物理上站不住；\nStableMaterials 的 rough/metal 是从 **6198 个真实 PBR 材质**（MatSynth + Deschaintre）\n学出来的，normal 也是网络直接预测的。这是派生链再精细也补不上的东西。\n\n## ★ 一条必须先知道的限制：图像条件化只有\"全局\"粒度\n\n`pipeline.__encode_image()` 走的是 `CLIPVisionModelWithProjection` 并取\n`.image_embeds` —— **池化后的单个 768 维向量**，不是空间特征图。实测：\n\n| 对照 | basecolor 平均差 |\n|---|---|\n| 原图 vs 原图**打乱块顺序**（像素不变、布局毁掉） | 0.084 |\n| 原图 vs 换成**一块纯均值色** | 0.083 |\n| 原图 vs 换成**随机噪声** | 0.113 |\n\n把布局彻底打乱造成的变化，**和直接换成一块纯色一样大**。所以：\n\n**StableMaterials 是\"照着这张 albedo 的宏观观感重新合成一套材质\"，不是\"给这张贴图配 PBR\"。**\n它输出的 height / normal 与输入 albedo 的颗粒**不会有空间对应关系**，别指望。\n\n⇒ 因此本工作流的 basecolor **用 SM 自己生成的**，不去混入输入 albedo：\n混进去只会得到\"高度图和颜色图案对不上\"的 PBR。输入 albedo 在这里的角色是\n**粗粒度选材提示**，不是被处理的对象。\n\n⇒ 推论（重要）：**真正在\"选材\"的是提示词和 seed，不是你的 LoRA。**\n两次实测都指向同一个结论：\n\n- 12 个 seed × 同一提示词 → 12 种互不相干的材质（砖缝、大理石、迷彩、树叶、木纹、沙）。\n- 8 个提示词 × 同一 seed → 材质家族随措辞改变，metallic 甚至从 0.002 跳到 0.286。\n\n所以**别指望\"这套 PBR 就是我 LoRA 那张贴图的通道\"**——它做不到。它是一个\n**可被提示词和 seed 操纵的材质生成器**。想要\"忠于你自己的贴图\"，请用另一条路：\n`sdxl_sand_pbr_seamless.json`（派生链），它才是空间对应的。\n\n## ★ 提示词和 seed 是这套参数里的两个真旋钮\n\n同一 seed、同一输入图，只换提示词（16 步）：\n\n| 提示词 | basecolor std | height std | metallic |\n|---|---|---|---|\n| **loose coarse sand, scattered …（默认）** | 0.129 | **0.118** | **0.002** |\n| desert sand surface texture … | 0.137 | 0.043 | 0.008 |\n| granular sand texture … | 0.182 | 0.041 | 0.011 |\n| wind rippled sand texture … | 0.145 | 0.047 | 0.039 |\n| dune sand, smooth fine grained … | 0.136 | 0.080 | **0.286（错）** |\n\n注意最后一行：**\"dune\" 这个词把电介质的沙推到了 29% 金属度**。措辞要显式：\n点名材质、说明 matte、说明 dielectric。\n\nseed 也一样敏感。**换 seed 的方法**：把 SM 节点上的 `seed` 控件切成 `randomize`\n（UI 里 seed 旁边那个下拉），连着跑几次挑一个——一次生成约 1 秒，扫 20 个候选\n也就 20 秒，比调任何参数都划算。\n\n## ★ 提示词必须给，而且它不是装饰\n\n实测（16 步，同 seed）：\n\n| 条件化方式 | normal 倾角 | metallic | 说明 |\n|---|---|---|---|\n| 只喂 albedo | 0.057 | **0.099** | 沙是电介质，0.099 是错的 |\n| **albedo + 提示词（本工作流默认）** | 0.057 | **0.001** | 物理正确 |\n| 只喂提示词 | 0.089 | 0.000 | normal 最好，但丢了 albedo 的粗选材 |\n\n融合走的是**序列维拼接**（albedo 一个 key + 提示词一个 key 一起做 cross-attention），\n不是 batch 拼接——batch 拼接会变成两次互相独立的生成。这个用法超出了模型卡\n记录的 `prompt=image` 或 `prompt=\"text\"`，所以做成了开关 `fuse_text`。\n\n## ★ 步数：默认 4 步是错的\n\nLCM 蒸馏默认 4 步，实测 **4 步下 normal 几乎是平的**（`mean|xy| = 0.025`，\n整张图就是一块纯蓝），basecolor 也带 LCM 噪点（std 0.20）：\n\n| steps | normal 倾角 | height std | basecolor std |\n|---|---|---|---|\n| 4 | 0.025 | 0.013 | 0.200 |\n| **16（本工作流默认）** | **0.057** | **0.037** | **0.128** |\n| 30 | 0.103 | 0.032 | 0.049 |\n\n16 步只要 **1.0–1.9 秒**，30 步 2.8 秒 —— 加步数几乎不要钱，没有理由留在 4 步。\n\n## 关于 `strict_torus`（默认**关**）\n\n`strict_torus` 是本节点包自己加的：把 SM 的 UNet 全部 conv 的 padding_mode 也设成\ncircular，让**每一步**都在环面上跑。SM 自带的 feature rolling 只覆盖\n`i >= len(timesteps)//4`，4 步时第 0 步仍是矩形拓扑。\n\n实测它**没有**让环绕更好（16 步，同 seed，最差环绕百分位）：\n\n| 配置 | 最差环绕百分位 |\n|---|---|\n| `tileable=T, strict_torus=T` | 82.1 |\n| `tileable=T, strict_torus=F` | **68.0** |\n| `tileable=F, strict_torus=T` | **100.0（明显接缝）** |\n| `tileable=F, strict_torus=F` | 99.8（明显接缝） |\n\n所以默认关（尊重作者的设计，且实测略好），但**保留为开关**：它在 4 步下会显著改变\n结果，也可以在你要\"每一步都可证明是环面\"时打开。\n\n⚠️ **`tileable` 绝对不能关**：它同时控制 VAE 解码那步的环形补边 + 裁回，\n关掉即使 `strict_torus` 开着也照样出缝（上表 100.0）。\n\n## 放大段的三个规则\n\n1. **basecolor / height 用 `Seamless Upscale`（Real-ESRGAN ×2）**：它们是有结构的高频图，\n   超分有意义。补边 256 是实测收敛值（与 pad=512 只差 0.16/255）。\n2. **normal 用周期化双三次放大，不超分**：法线的通道是**向量分量不是颜色**，超分会当成\n   彩色图去锐化、破坏归一化。实测周期双三次放大已经把幅度完整保住了：\n\n   | | 平均倾角 | p95 倾角 | norm 均值 |\n   |---|---|---|---|\n   | SM 原生 @512 | 8.76° | 14.39° | 0.9955 |\n   | **周期双三次 ×2（本工作流）** | **8.81°** | **14.39°** | 0.9928 |\n\n   放大后 norm 最大偏差约 7%，任何引擎采样后都会重新归一化，可忽略。\n\n   ⚠️ **不要改成从 height 重导**。我第一版就是这么写的，实测是错的：SM 的 height 起伏很低，\n   且与它自己的 normal 本来就**解耦**（相关只有 +0.41），拿 height 重导会把倾角从\n   8.76° 砍到 **2.10°**（bump=2.5 时）——等于把网络学到的 mesostructure 全丢了。\n   真要用重导，bump 得开到 7.5 左右才能补回幅度（实测 @512：1.25→1.05°、2.5→2.10°、\n   5.0→4.19°、7.5→6.25°；@1024 同一 bump 的倾角约为 512 的 1.4 倍）。\n3. **roughness / metallic 用 `Seamless Resize`（bicubic）**：低频无结构，超分只会\n   编造与高度图不对应的纹理。\n\n## 参数怎么调\n\n- `steps`（SM 节点）：**第一优先**。16 → 30 能再买到一截 normal 细节。\n- `prompt`（SM 节点）：决定材质家族，尤其决定 metallic 是否物理正确。**别清空**。\n- `guidance_scale`：实测 4 → 16 影响很小（metallic 0.001→0.003）。保持 10。\n- 想调法线强度：**别动 normal**（它是网络预测的，改它没有物理含义），\n  要么调 `Seamless Resize` 之后的下游强度，要么改用 height 驱动。\n\n## 已知上限（诚实说明）\n\n- base model 只在 **512** 训练，官方 refiner **未发布**，所以 512 以上的细节\n  全部来自超分，不是模型生成的。\n- 只在 **LCM 路径**可用：`unet/`（3.44 GB 标准 UNet）没有下载，所以\n  `Load StableMaterials` 的 mode **必须是 `LCM (4 steps, fast)`**，选 Standard 会报\n  `no file named config.json found in ...`。\n- 输入 albedo 偏平（SDXL 那张 std 只有 0.012）时，SM 得到的是一个弱条件，\n  输出也会偏平。这是数据集/训练问题，不是链路问题。\n- 首次加载 SM 管线在 ComfyUI 里实测**只要 2–3 秒**（权重在本地缓存；探针脚本里因为\n  huggingface.co 不可达会多花约 25 秒重试，ComfyUI 进程里没有出现）。\n\n        albedo @1024 --area/2--> @512 --StableMaterials(LCM,16步,tileable)--> 5 张 @512\n             |                                                                   |\n             |                                            basecolor/height --ESRGAN x2-->\n             |                                            roughness/metallic/normal --bicubic-->\n             +--> 存 albedo @1024 与 @512                 height @1024 --> AO/ORM @1024\n"
+      ],
+      "widgets_values_named": {
+        "text": "# 完整 PBR 贴图 · StableMaterials 版（模型生成，非派生）\n\n左半段和 `sdxl_sand_pbr_seamless.json` 一样：SDXL + 沙砾 LoRA，靠**改采样 padding**\n出数学上四方连续的 albedo @1024。右半段把 albedo 降到 512 交给 **StableMaterials**\n（Vecchio et al., CVPR 2026, arXiv 2406.09293），一次前向得到 **5 张严格对齐**的\nbasecolor / normal / height / roughness / metallic，再放大回 1024。\n\n## 为什么值得换成模型生成\n\n派生链（`pbr.py`）的 roughness 是从 **albedo 亮度**推的，物理上站不住；\nStableMaterials 的 rough/metal 是从 **6198 个真实 PBR 材质**（MatSynth + Deschaintre）\n学出来的，normal 也是网络直接预测的。这是派生链再精细也补不上的东西。\n\n## ★ 一条必须先知道的限制：图像条件化只有\"全局\"粒度\n\n`pipeline.__encode_image()` 走的是 `CLIPVisionModelWithProjection` 并取\n`.image_embeds` —— **池化后的单个 768 维向量**，不是空间特征图。实测：\n\n| 对照 | basecolor 平均差 |\n|---|---|\n| 原图 vs 原图**打乱块顺序**（像素不变、布局毁掉） | 0.084 |\n| 原图 vs 换成**一块纯均值色** | 0.083 |\n| 原图 vs 换成**随机噪声** | 0.113 |\n\n把布局彻底打乱造成的变化，**和直接换成一块纯色一样大**。所以：\n\n**StableMaterials 是\"照着这张 albedo 的宏观观感重新合成一套材质\"，不是\"给这张贴图配 PBR\"。**\n它输出的 height / normal 与输入 albedo 的颗粒**不会有空间对应关系**，别指望。\n\n⇒ 因此本工作流的 basecolor **用 SM 自己生成的**，不去混入输入 albedo：\n混进去只会得到\"高度图和颜色图案对不上\"的 PBR。输入 albedo 在这里的角色是\n**粗粒度选材提示**，不是被处理的对象。\n\n⇒ 推论（重要）：**真正在\"选材\"的是提示词和 seed，不是你的 LoRA。**\n两次实测都指向同一个结论：\n\n- 12 个 seed × 同一提示词 → 12 种互不相干的材质（砖缝、大理石、迷彩、树叶、木纹、沙）。\n- 8 个提示词 × 同一 seed → 材质家族随措辞改变，metallic 甚至从 0.002 跳到 0.286。\n\n所以**别指望\"这套 PBR 就是我 LoRA 那张贴图的通道\"**——它做不到。它是一个\n**可被提示词和 seed 操纵的材质生成器**。想要\"忠于你自己的贴图\"，请用另一条路：\n`sdxl_sand_pbr_seamless.json`（派生链），它才是空间对应的。\n\n## ★ 提示词和 seed 是这套参数里的两个真旋钮\n\n同一 seed、同一输入图，只换提示词（16 步）：\n\n| 提示词 | basecolor std | height std | metallic |\n|---|---|---|---|\n| **loose coarse sand, scattered …（默认）** | 0.129 | **0.118** | **0.002** |\n| desert sand surface texture … | 0.137 | 0.043 | 0.008 |\n| granular sand texture … | 0.182 | 0.041 | 0.011 |\n| wind rippled sand texture … | 0.145 | 0.047 | 0.039 |\n| dune sand, smooth fine grained … | 0.136 | 0.080 | **0.286（错）** |\n\n注意最后一行：**\"dune\" 这个词把电介质的沙推到了 29% 金属度**。措辞要显式：\n点名材质、说明 matte、说明 dielectric。\n\nseed 也一样敏感。**换 seed 的方法**：把 SM 节点上的 `seed` 控件切成 `randomize`\n（UI 里 seed 旁边那个下拉），连着跑几次挑一个——一次生成约 1 秒，扫 20 个候选\n也就 20 秒，比调任何参数都划算。\n\n## ★ 提示词必须给，而且它不是装饰\n\n实测（16 步，同 seed）：\n\n| 条件化方式 | normal 倾角 | metallic | 说明 |\n|---|---|---|---|\n| 只喂 albedo | 0.057 | **0.099** | 沙是电介质，0.099 是错的 |\n| **albedo + 提示词（本工作流默认）** | 0.057 | **0.001** | 物理正确 |\n| 只喂提示词 | 0.089 | 0.000 | normal 最好，但丢了 albedo 的粗选材 |\n\n融合走的是**序列维拼接**（albedo 一个 key + 提示词一个 key 一起做 cross-attention），\n不是 batch 拼接——batch 拼接会变成两次互相独立的生成。这个用法超出了模型卡\n记录的 `prompt=image` 或 `prompt=\"text\"`，所以做成了开关 `fuse_text`。\n\n## ★ 步数：默认 4 步是错的\n\nLCM 蒸馏默认 4 步，实测 **4 步下 normal 几乎是平的**（`mean|xy| = 0.025`，\n整张图就是一块纯蓝），basecolor 也带 LCM 噪点（std 0.20）：\n\n| steps | normal 倾角 | height std | basecolor std |\n|---|---|---|---|\n| 4 | 0.025 | 0.013 | 0.200 |\n| **16（本工作流默认）** | **0.057** | **0.037** | **0.128** |\n| 30 | 0.103 | 0.032 | 0.049 |\n\n16 步只要 **1.0–1.9 秒**，30 步 2.8 秒 —— 加步数几乎不要钱，没有理由留在 4 步。\n\n## 关于 `strict_torus`（默认**关**）\n\n`strict_torus` 是本节点包自己加的：把 SM 的 UNet 全部 conv 的 padding_mode 也设成\ncircular，让**每一步**都在环面上跑。SM 自带的 feature rolling 只覆盖\n`i >= len(timesteps)//4`，4 步时第 0 步仍是矩形拓扑。\n\n实测它**没有**让环绕更好（16 步，同 seed，最差环绕百分位）：\n\n| 配置 | 最差环绕百分位 |\n|---|---|\n| `tileable=T, strict_torus=T` | 82.1 |\n| `tileable=T, strict_torus=F` | **68.0** |\n| `tileable=F, strict_torus=T` | **100.0（明显接缝）** |\n| `tileable=F, strict_torus=F` | 99.8（明显接缝） |\n\n所以默认关（尊重作者的设计，且实测略好），但**保留为开关**：它在 4 步下会显著改变\n结果，也可以在你要\"每一步都可证明是环面\"时打开。\n\n⚠️ **`tileable` 绝对不能关**：它同时控制 VAE 解码那步的环形补边 + 裁回，\n关掉即使 `strict_torus` 开着也照样出缝（上表 100.0）。\n\n## 放大段的三个规则\n\n1. **basecolor / height 用 `Seamless Upscale`（Real-ESRGAN ×2）**：它们是有结构的高频图，\n   超分有意义。补边 256 是实测收敛值（与 pad=512 只差 0.16/255）。\n2. **normal 用周期化双三次放大，不超分**：法线的通道是**向量分量不是颜色**，超分会当成\n   彩色图去锐化、破坏归一化。实测周期双三次放大已经把幅度完整保住了：\n\n   | | 平均倾角 | p95 倾角 | norm 均值 |\n   |---|---|---|---|\n   | SM 原生 @512 | 8.76° | 14.39° | 0.9955 |\n   | **周期双三次 ×2（本工作流）** | **8.81°** | **14.39°** | 0.9928 |\n\n   放大后 norm 最大偏差约 7%，任何引擎采样后都会重新归一化，可忽略。\n\n   ⚠️ **不要改成从 height 重导**。我第一版就是这么写的，实测是错的：SM 的 height 起伏很低，\n   且与它自己的 normal 本来就**解耦**（相关只有 +0.41），拿 height 重导会把倾角从\n   8.76° 砍到 **2.10°**（bump=2.5 时）——等于把网络学到的 mesostructure 全丢了。\n   真要用重导，bump 得开到 7.5 左右才能补回幅度（实测 @512：1.25→1.05°、2.5→2.10°、\n   5.0→4.19°、7.5→6.25°；@1024 同一 bump 的倾角约为 512 的 1.4 倍）。\n3. **roughness / metallic 用 `Seamless Resize`（bicubic）**：低频无结构，超分只会\n   编造与高度图不对应的纹理。\n\n## 参数怎么调\n\n- `steps`（SM 节点）：**第一优先**。16 → 30 能再买到一截 normal 细节。\n- `prompt`（SM 节点）：决定材质家族，尤其决定 metallic 是否物理正确。**别清空**。\n- `guidance_scale`：实测 4 → 16 影响很小（metallic 0.001→0.003）。保持 10。\n- 想调法线强度：**别动 normal**（它是网络预测的，改它没有物理含义），\n  要么调 `Seamless Resize` 之后的下游强度，要么改用 height 驱动。\n\n## 已知上限（诚实说明）\n\n- base model 只在 **512** 训练，官方 refiner **未发布**，所以 512 以上的细节\n  全部来自超分，不是模型生成的。\n- 只在 **LCM 路径**可用：`unet/`（3.44 GB 标准 UNet）没有下载，所以\n  `Load StableMaterials` 的 mode **必须是 `LCM (4 steps, fast)`**，选 Standard 会报\n  `no file named config.json found in ...`。\n- 输入 albedo 偏平（SDXL 那张 std 只有 0.012）时，SM 得到的是一个弱条件，\n  输出也会偏平。这是数据集/训练问题，不是链路问题。\n- 首次加载 SM 管线在 ComfyUI 里实测**只要 2–3 秒**（权重在本地缓存；探针脚本里因为\n  huggingface.co 不可达会多花约 25 秒重试，ComfyUI 进程里没有出现）。\n\n        albedo @1024 --area/2--> @512 --StableMaterials(LCM,16步,tileable)--> 5 张 @512\n             |                                                                   |\n             |                                            basecolor/height --ESRGAN x2-->\n             |                                            roughness/metallic/normal --bicubic-->\n             +--> 存 albedo @1024 与 @512                 height @1024 --> AO/ORM @1024\n"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 2,
+      "type": "CheckpointLoaderSimple",
+      "pos": [
+        -2265.7435523999993,
+        127.13846713999997
+      ],
+      "size": [
+        380,
+        110
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            1
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            2
+          ]
+        },
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            11
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CheckpointLoaderSimple"
+      },
+      "widgets_values": [
+        "sd_xl_base_1.0.safetensors"
+      ],
+      "widgets_values_named": {
+        "ckpt_name": "sd_xl_base_1.0.safetensors"
+      }
+    },
+    {
+      "id": 3,
+      "type": "LoraLoader",
+      "pos": [
+        -2265.7435523999993,
+        281.13846714000005
+      ],
+      "size": [
+        380,
+        140
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            5
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            3,
+            4
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoraLoader"
+      },
+      "widgets_values": [
+        "sdxl-texture-sand-lora-v1-000004.safetensors",
+        1,
+        1
+      ],
+      "widgets_values_named": {
+        "lora_name": "sdxl-texture-sand-lora-v1-000004.safetensors",
+        "strength_model": 1,
+        "strength_clip": 1
+      }
+    },
+    {
+      "id": 4,
+      "type": "CLIPTextEncode",
+      "pos": [
+        -1775.7435523999993,
+        127.13846713999997
+      ],
+      "size": [
+        480,
+        280
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            7
+          ]
+        }
+      ],
+      "title": "Positive · mtrlx = 触发词",
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "mtrlx, seamless tileable pbr texture, seamless flat surface, flat top-down view, even lighting, fine detailed, high frequency texture, small scale pattern, pale khaki sand, fine even grain"
+      ],
+      "widgets_values_named": {
+        "text": "mtrlx, seamless tileable pbr texture, seamless flat surface, flat top-down view, even lighting, fine detailed, high frequency texture, small scale pattern, pale khaki sand, fine even grain"
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 5,
+      "type": "CLIPTextEncode",
+      "pos": [
+        -1775.7435523999993,
+        451.13846714000005
+      ],
+      "size": [
+        480,
+        280
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            8
+          ]
+        }
+      ],
+      "title": "Negative",
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "blurry, lowres, out of focus, jpeg artifacts, watermark, text, signature, logo, perspective view, side view, harsh shadows, cast shadows, vignette, lighting gradient, depth of field, bokeh, flat solid color, cartoon, painting, tiling seam, visible grid, tile border"
+      ],
+      "widgets_values_named": {
+        "text": "blurry, lowres, out of focus, jpeg artifacts, watermark, text, signature, logo, perspective view, side view, harsh shadows, cast shadows, vignette, lighting gradient, depth of field, bokeh, flat solid color, cartoon, painting, tiling seam, visible grid, tile border"
+      },
+      "color": "#223",
+      "bgcolor": "#335"
+    },
+    {
+      "id": 6,
+      "type": "EmptyLatentImage",
+      "pos": [
+        -1775.7435523999993,
+        775.1384671400001
+      ],
+      "size": [
+        480,
+        120
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            9
+          ]
+        }
+      ],
+      "title": "Tile size · 1024",
+      "properties": {
+        "Node name for S&R": "EmptyLatentImage"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        1
+      ],
+      "widgets_values_named": {
+        "width": 1024,
+        "height": 1024,
+        "batch_size": 1
+      },
+      "color": "#323",
+      "bgcolor": "#535"
+    },
+    {
+      "id": 7,
+      "type": "SeamlessModelPadding",
+      "pos": [
+        -1775.7435523999993,
+        939.1384671400001
+      ],
+      "size": [
+        480,
+        110
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": [
+            6
+          ]
+        }
+      ],
+      "title": "Seamless Model Padding · 环面化",
+      "properties": {
+        "Node name for S&R": "SeamlessModelPadding"
+      },
+      "widgets_values": [
+        "circular"
+      ],
+      "widgets_values_named": {
+        "mode": "circular"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 8,
+      "type": "KSampler",
+      "pos": [
+        -1285.7435523999993,
+        127.13846713999997
+      ],
+      "size": [
+        340,
+        320
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 6
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 7
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 8
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            10
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "KSampler"
+      },
+      "widgets_values": [
+        20261010,
+        "fixed",
+        30,
+        6.5,
+        "dpmpp_2m",
+        "karras",
+        1
+      ],
+      "widgets_values_named": {
+        "seed": 20261010,
+        "control_after_generate": "fixed",
+        "steps": 30,
+        "cfg": 6.5,
+        "sampler_name": "dpmpp_2m",
+        "scheduler": "karras",
+        "denoise": 1
+      }
+    },
+    {
+      "id": 9,
+      "type": "SeamlessVAEDecode",
+      "pos": [
+        -1285.7435523999993,
+        491.13846714000005
+      ],
+      "size": [
+        340,
+        110
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 10
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 11
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            12,
+            13
+          ]
+        }
+      ],
+      "title": "Seamless VAE Decode",
+      "properties": {
+        "Node name for S&R": "SeamlessVAEDecode"
+      },
+      "widgets_values": [
+        8
+      ],
+      "widgets_values_named": {
+        "margin": 8
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 10,
+      "type": "SaveImage",
+      "pos": [
+        -795.7435523999997,
+        127.13846713999997
+      ],
+      "size": [
+        400,
+        360
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 12
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "Albedo @1024（LoRA 的产物）",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_pbr_sm/sand_sm_albedo_1024"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_pbr_sm/sand_sm_albedo_1024"
+      }
+    },
+    {
+      "id": 11,
+      "type": "SeamlessResize",
+      "pos": [
+        -823.6812423999995,
+        589.0502771400003
+      ],
+      "size": [
+        405.8208984375,
+        190
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 13
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            14,
+            16
+          ]
+        }
+      ],
+      "title": "Seamless Resize · 1024→512（area = 2x2 均值，周期）",
+      "properties": {
+        "Node name for S&R": "SeamlessResize"
+      },
+      "widgets_values": [
+        0.5,
+        "area",
+        32,
+        true
+      ],
+      "widgets_values_named": {
+        "scale_by": 0.5,
+        "method": "area",
+        "pad": 32,
+        "circular": true
+      },
+      "color": "#245",
+      "bgcolor": "#467"
+    },
+    {
+      "id": 12,
+      "type": "SaveImage",
+      "pos": [
+        -822.3502423999998,
+        848.33927714
+      ],
+      "size": [
+        400,
+        360
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 14
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "Albedo @512（喂给 SM 的）",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_pbr_sm/sand_sm_albedo_512"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_pbr_sm/sand_sm_albedo_512"
+      }
+    },
+    {
+      "id": 13,
+      "type": "LoadStableMaterials",
+      "pos": [
+        -220,
+        140
+      ],
+      "size": [
+        400,
+        100
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "pipeline",
+          "type": "SM_PIPELINE",
+          "links": [
+            15
+          ]
+        }
+      ],
+      "title": "Load StableMaterials · 必须选 LCM",
+      "properties": {
+        "Node name for S&R": "LoadStableMaterials"
+      },
+      "widgets_values": [
+        "LCM (4 steps, fast)"
+      ],
+      "widgets_values_named": {
+        "mode": "LCM (4 steps, fast)"
+      }
+    },
+    {
+      "id": 14,
+      "type": "SeamlessMaterialsFromAlbedo",
+      "pos": [
+        -220,
+        284
+      ],
+      "size": [
+        440,
+        560
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "pipeline",
+          "type": "SM_PIPELINE",
+          "link": 15
+        },
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 16
+        }
+      ],
+      "outputs": [
+        {
+          "name": "basecolor",
+          "type": "IMAGE",
+          "links": [
+            21,
+            25,
+            31
+          ]
+        },
+        {
+          "name": "normal",
+          "type": "IMAGE",
+          "links": [
+            22,
+            33
+          ]
+        },
+        {
+          "name": "height",
+          "type": "IMAGE",
+          "links": [
+            17,
+            23,
+            32
+          ]
+        },
+        {
+          "name": "roughness",
+          "type": "IMAGE",
+          "links": [
+            19,
+            34
+          ]
+        },
+        {
+          "name": "metallic",
+          "type": "IMAGE",
+          "links": [
+            20,
+            35
+          ]
+        }
+      ],
+      "title": "StableMaterials · albedo + 提示词 → 5 张对齐贴图",
+      "properties": {
+        "Node name for S&R": "SeamlessMaterialsFromAlbedo"
+      },
+      "widgets_values": [
+        777,
+        "fixed",
+        16,
+        10,
+        512,
+        true,
+        false,
+        true,
+        "loose coarse sand, scattered dark mineral grains, small pebbles, matte dielectric surface, even diffuse albedo"
+      ],
+      "widgets_values_named": {
+        "seed": 777,
+        "control_after_generate": "fixed",
+        "steps": 16,
+        "guidance_scale": 10,
+        "size": 512,
+        "tileable": true,
+        "strict_torus": false,
+        "fuse_text": true,
+        "prompt": "loose coarse sand, scattered dark mineral grains, small pebbles, matte dielectric surface, even diffuse albedo"
+      },
+      "color": "#435",
+      "bgcolor": "#657"
+    },
+    {
+      "id": 15,
+      "type": "SeamlessAOFromHeight",
+      "pos": [
+        417.03956300000016,
+        140
+      ],
+      "size": [
+        440,
+        180
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "height",
+          "type": "IMAGE",
+          "link": 17
+        }
+      ],
+      "outputs": [
+        {
+          "name": "ao",
+          "type": "IMAGE",
+          "links": [
+            18
+          ]
+        }
+      ],
+      "title": "AO @512（来自 SM 的 height）",
+      "properties": {
+        "Node name for S&R": "SeamlessAOFromHeight"
+      },
+      "widgets_values": [
+        24,
+        4,
+        1,
+        1,
+        2
+      ],
+      "widgets_values_named": {
+        "radius": 24,
+        "scales": 4,
+        "strength": 1,
+        "gamma": 1,
+        "smooth": 2
+      },
+      "color": "#245",
+      "bgcolor": "#467"
+    },
+    {
+      "id": 16,
+      "type": "PackPBRChannels",
+      "pos": [
+        417.03956300000016,
+        364
+      ],
+      "size": [
+        440,
+        140
+      ],
+      "flags": {},
+      "order": 30,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "ao",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 18
+        },
+        {
+          "name": "roughness",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 19
+        },
+        {
+          "name": "metalness",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 20
+        }
+      ],
+      "outputs": [
+        {
+          "name": "orm",
+          "type": "IMAGE",
+          "links": [
+            24,
+            27
+          ]
+        }
+      ],
+      "title": "ORM @512 · R=AO G=Rough B=SM 的 metallic",
+      "properties": {
+        "Node name for S&R": "PackPBRChannels"
+      },
+      "widgets_values": [
+        0
+      ],
+      "widgets_values_named": {
+        "metalness_value": 0
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 17,
+      "type": "TilePreview",
+      "pos": [
+        417.03956300000016,
+        548
+      ],
+      "size": [
+        440,
+        110
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 25
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            26
+          ]
+        }
+      ],
+      "title": "2x2 自检 · basecolor @512",
+      "properties": {
+        "Node name for S&R": "TilePreview"
+      },
+      "widgets_values": [
+        2,
+        2
+      ],
+      "widgets_values_named": {
+        "tiles_x": 2,
+        "tiles_y": 2
+      },
+      "color": "#542",
+      "bgcolor": "#764"
+    },
+    {
+      "id": 18,
+      "type": "TilePreview",
+      "pos": [
+        417.03956300000016,
+        702
+      ],
+      "size": [
+        440,
+        110
+      ],
+      "flags": {},
+      "order": 36,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 27
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            28
+          ]
+        }
+      ],
+      "title": "2x2 自检 · ORM @512",
+      "properties": {
+        "Node name for S&R": "TilePreview"
+      },
+      "widgets_values": [
+        2,
+        2
+      ],
+      "widgets_values_named": {
+        "tiles_x": 2,
+        "tiles_y": 2
+      },
+      "color": "#542",
+      "bgcolor": "#764"
+    },
+    {
+      "id": 19,
+      "type": "SaveImage",
+      "pos": [
+        927.0395630000004,
+        140
+      ],
+      "size": [
+        400,
+        340
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 21
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "basecolor @512 · SM 原生",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_pbr_sm/sand_sm_512_basecolor"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_pbr_sm/sand_sm_512_basecolor"
+      }
+    },
+    {
+      "id": 20,
+      "type": "SaveImage",
+      "pos": [
+        927.0395630000004,
+        524
+      ],
+      "size": [
+        400,
+        340
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 22
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "normal @512 · SM 原生（网络直接预测的）",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_pbr_sm/sand_sm_512_normal"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_pbr_sm/sand_sm_512_normal"
+      }
+    },
+    {
+      "id": 21,
+      "type": "SaveImage",
+      "pos": [
+        444.47377729712383,
+        956.7708024904338
+      ],
+      "size": [
+        400,
+        340
+      ],
+      "flags": {},
+      "order": 21,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 23
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "height @512 · SM 原生",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_pbr_sm/sand_sm_512_height"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_pbr_sm/sand_sm_512_height"
+      }
+    },
+    {
+      "id": 22,
+      "type": "SaveImage",
+      "pos": [
+        932.0973597959232,
+        956.8969183956326
+      ],
+      "size": [
+        400,
+        340
+      ],
+      "flags": {},
+      "order": 35,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 24
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "ORM @512",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_pbr_sm/sand_sm_512_orm"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_pbr_sm/sand_sm_512_orm"
+      }
+    },
+    {
+      "id": 23,
+      "type": "SaveImage",
+      "pos": [
+        444.4737772971244,
+        1379.8030552971354
+      ],
+      "size": [
+        400,
+        340
+      ],
+      "flags": {},
+      "order": 25,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 26
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "basecolor 2x2 @512",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_pbr_sm/sand_sm_512_basecolor_tilecheck_2x2"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_pbr_sm/sand_sm_512_basecolor_tilecheck_2x2"
+      }
+    },
+    {
+      "id": 24,
+      "type": "SaveImage",
+      "pos": [
+        929.5036173358238,
+        1385.1166561225398
+      ],
+      "size": [
+        400,
+        340
+      ],
+      "flags": {},
+      "order": 38,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 28
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "ORM 2x2 @512",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_pbr_sm/sand_sm_512_orm_tilecheck_2x2"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_pbr_sm/sand_sm_512_orm_tilecheck_2x2"
+      }
+    },
+    {
+      "id": 25,
+      "type": "UpscaleModelLoader",
+      "pos": [
+        1595.0312916321072,
+        187.41378983350808
+      ],
+      "size": [
+        440,
+        90
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "UPSCALE_MODEL",
+          "type": "UPSCALE_MODEL",
+          "links": [
+            29,
+            30
+          ]
+        }
+      ],
+      "title": "Real-ESRGAN x2",
+      "properties": {
+        "Node name for S&R": "UpscaleModelLoader"
+      },
+      "widgets_values": [
+        "RealESRGAN_x2.pth"
+      ],
+      "widgets_values_named": {
+        "model_name": "RealESRGAN_x2.pth"
+      }
+    },
+    {
+      "id": 26,
+      "type": "SeamlessUpscale",
+      "pos": [
+        1595.0312916321072,
+        321.41378983350523
+      ],
+      "size": [
+        440,
+        180
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "upscale_model",
+          "type": "UPSCALE_MODEL",
+          "link": 29
+        },
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 31
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            40,
+            44
+          ]
+        }
+      ],
+      "title": "Seamless Upscale · basecolor 512→1024",
+      "properties": {
+        "Node name for S&R": "SeamlessUpscale"
+      },
+      "widgets_values": [
+        256,
+        true,
+        0
+      ],
+      "widgets_values_named": {
+        "pad": 256,
+        "circular": true,
+        "tile": 0
+      },
+      "color": "#435",
+      "bgcolor": "#657"
+    },
+    {
+      "id": 27,
+      "type": "SeamlessUpscale",
+      "pos": [
+        1595.0312916321072,
+        545.4137898335052
+      ],
+      "size": [
+        440,
+        180
+      ],
+      "flags": {},
+      "order": 22,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "upscale_model",
+          "type": "UPSCALE_MODEL",
+          "link": 30
+        },
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 32
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            36,
+            41
+          ]
+        }
+      ],
+      "title": "Seamless Upscale · height 512→1024",
+      "properties": {
+        "Node name for S&R": "SeamlessUpscale"
+      },
+      "widgets_values": [
+        256,
+        true,
+        0
+      ],
+      "widgets_values_named": {
+        "pad": 256,
+        "circular": true,
+        "tile": 0
+      },
+      "color": "#435",
+      "bgcolor": "#657"
+    },
+    {
+      "id": 28,
+      "type": "SeamlessResize",
+      "pos": [
+        1595.0312916321072,
+        769.4137898335064
+      ],
+      "size": [
+        440,
+        180
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 33
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            42,
+            46
+          ]
+        }
+      ],
+      "title": "Normal 512→1024 · 周期双三次（保留网络预测的幅度）",
+      "properties": {
+        "Node name for S&R": "SeamlessResize"
+      },
+      "widgets_values": [
+        2,
+        "bicubic",
+        32,
+        true
+      ],
+      "widgets_values_named": {
+        "scale_by": 2,
+        "method": "bicubic",
+        "pad": 32,
+        "circular": true
+      },
+      "color": "#245",
+      "bgcolor": "#467"
+    },
+    {
+      "id": 29,
+      "type": "SeamlessResize",
+      "pos": [
+        1595.0312916321072,
+        993.4137898335075
+      ],
+      "size": [
+        440,
+        180
+      ],
+      "flags": {},
+      "order": 23,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 34
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            38
+          ]
+        }
+      ],
+      "title": "Roughness 512→1024 · 普通双三次（不超分）",
+      "properties": {
+        "Node name for S&R": "SeamlessResize"
+      },
+      "widgets_values": [
+        2,
+        "bicubic",
+        32,
+        true
+      ],
+      "widgets_values_named": {
+        "scale_by": 2,
+        "method": "bicubic",
+        "pad": 32,
+        "circular": true
+      },
+      "color": "#245",
+      "bgcolor": "#467"
+    },
+    {
+      "id": 30,
+      "type": "SeamlessResize",
+      "pos": [
+        1595.0312916321072,
+        1217.4137898335077
+      ],
+      "size": [
+        440,
+        180
+      ],
+      "flags": {},
+      "order": 24,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 35
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            39
+          ]
+        }
+      ],
+      "title": "Metallic 512→1024 · 普通双三次（不超分）",
+      "properties": {
+        "Node name for S&R": "SeamlessResize"
+      },
+      "widgets_values": [
+        2,
+        "bicubic",
+        32,
+        true
+      ],
+      "widgets_values_named": {
+        "scale_by": 2,
+        "method": "bicubic",
+        "pad": 32,
+        "circular": true
+      },
+      "color": "#245",
+      "bgcolor": "#467"
+    },
+    {
+      "id": 31,
+      "type": "SeamlessAOFromHeight",
+      "pos": [
+        1595.0312916321072,
+        1441.4137898335073
+      ],
+      "size": [
+        440,
+        180
+      ],
+      "flags": {},
+      "order": 31,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "height",
+          "type": "IMAGE",
+          "link": 36
+        }
+      ],
+      "outputs": [
+        {
+          "name": "ao",
+          "type": "IMAGE",
+          "links": [
+            37
+          ]
+        }
+      ],
+      "title": "AO @1024（半径同步放大 24→48）",
+      "properties": {
+        "Node name for S&R": "SeamlessAOFromHeight"
+      },
+      "widgets_values": [
+        48,
+        4,
+        1,
+        1,
+        4
+      ],
+      "widgets_values_named": {
+        "radius": 48,
+        "scales": 4,
+        "strength": 1,
+        "gamma": 1,
+        "smooth": 4
+      },
+      "color": "#245",
+      "bgcolor": "#467"
+    },
+    {
+      "id": 32,
+      "type": "PackPBRChannels",
+      "pos": [
+        2158.1239174327684,
+        203.37693053803088
+      ],
+      "size": [
+        440,
+        140
+      ],
+      "flags": {},
+      "order": 37,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "ao",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 37
+        },
+        {
+          "name": "roughness",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 38
+        },
+        {
+          "name": "metalness",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 39
+        }
+      ],
+      "outputs": [
+        {
+          "name": "orm",
+          "type": "IMAGE",
+          "links": [
+            43,
+            48
+          ]
+        }
+      ],
+      "title": "ORM @1024 · R=AO G=Rough B=Metal",
+      "properties": {
+        "Node name for S&R": "PackPBRChannels"
+      },
+      "widgets_values": [
+        0
+      ],
+      "widgets_values_named": {
+        "metalness_value": 0
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 33,
+      "type": "TilePreview",
+      "pos": [
+        2158.1239174327684,
+        387.3769305380278
+      ],
+      "size": [
+        440,
+        110
+      ],
+      "flags": {},
+      "order": 27,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 44
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            45
+          ]
+        }
+      ],
+      "title": "2x2 自检 · basecolor @1024",
+      "properties": {
+        "Node name for S&R": "TilePreview"
+      },
+      "widgets_values": [
+        2,
+        2
+      ],
+      "widgets_values_named": {
+        "tiles_x": 2,
+        "tiles_y": 2
+      },
+      "color": "#542",
+      "bgcolor": "#764"
+    },
+    {
+      "id": 34,
+      "type": "TilePreview",
+      "pos": [
+        2158.1239174327684,
+        541.3769305380291
+      ],
+      "size": [
+        440,
+        110
+      ],
+      "flags": {},
+      "order": 29,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 46
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            47
+          ]
+        }
+      ],
+      "title": "2x2 自检 · normal @1024（最易藏 1px 缝）",
+      "properties": {
+        "Node name for S&R": "TilePreview"
+      },
+      "widgets_values": [
+        2,
+        2
+      ],
+      "widgets_values_named": {
+        "tiles_x": 2,
+        "tiles_y": 2
+      },
+      "color": "#542",
+      "bgcolor": "#764"
+    },
+    {
+      "id": 35,
+      "type": "TilePreview",
+      "pos": [
+        2158.1239174327684,
+        695.3769305380303
+      ],
+      "size": [
+        440,
+        110
+      ],
+      "flags": {},
+      "order": 40,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 48
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            49
+          ]
+        }
+      ],
+      "title": "2x2 自检 · ORM @1024",
+      "properties": {
+        "Node name for S&R": "TilePreview"
+      },
+      "widgets_values": [
+        2,
+        2
+      ],
+      "widgets_values_named": {
+        "tiles_x": 2,
+        "tiles_y": 2
+      },
+      "color": "#542",
+      "bgcolor": "#764"
+    },
+    {
+      "id": 36,
+      "type": "SaveImage",
+      "pos": [
+        2687.1114091119307,
+        222.2369704780509
+      ],
+      "size": [
+        400,
+        340
+      ],
+      "flags": {},
+      "order": 26,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 40
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "basecolor @1024（超分）",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_pbr_sm/sand_sm_1024_basecolor"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_pbr_sm/sand_sm_1024_basecolor"
+      }
+    },
+    {
+      "id": 37,
+      "type": "SaveImage",
+      "pos": [
+        2687.1114091119307,
+        606.2369704780523
+      ],
+      "size": [
+        400,
+        340
+      ],
+      "flags": {},
+      "order": 32,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 41
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "height @1024（超分）",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_pbr_sm/sand_sm_1024_height"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_pbr_sm/sand_sm_1024_height"
+      }
+    },
+    {
+      "id": 38,
+      "type": "SaveImage",
+      "pos": [
+        3141.275229111929,
+        222.02370047805846
+      ],
+      "size": [
+        400,
+        340
+      ],
+      "flags": {},
+      "order": 28,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 42
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "normal @1024（从放大 height 重导）",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_pbr_sm/sand_sm_1024_normal"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_pbr_sm/sand_sm_1024_normal"
+      }
+    },
+    {
+      "id": 39,
+      "type": "SaveImage",
+      "pos": [
+        3144.55326116593,
+        631.4834478130566
+      ],
+      "size": [
+        400,
+        340
+      ],
+      "flags": {},
+      "order": 39,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 43
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "ORM @1024 · 交付物",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_pbr_sm/sand_sm_1024_orm"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_pbr_sm/sand_sm_1024_orm"
+      }
+    },
+    {
+      "id": 40,
+      "type": "SaveImage",
+      "pos": [
+        2675.321670656931,
+        1050.8526631780608
+      ],
+      "size": [
+        400,
+        340
+      ],
+      "flags": {},
+      "order": 33,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 45
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "basecolor 2x2 @1024",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_pbr_sm/sand_sm_1024_basecolor_tilecheck_2x2"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_pbr_sm/sand_sm_1024_basecolor_tilecheck_2x2"
+      }
+    },
+    {
+      "id": 41,
+      "type": "SaveImage",
+      "pos": [
+        3153.9850519299293,
+        1059.9389803090664
+      ],
+      "size": [
+        400,
+        340
+      ],
+      "flags": {},
+      "order": 34,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 47
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "normal 2x2 @1024",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_pbr_sm/sand_sm_1024_normal_tilecheck_2x2"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_pbr_sm/sand_sm_1024_normal_tilecheck_2x2"
+      }
+    },
+    {
+      "id": 42,
+      "type": "SaveImage",
+      "pos": [
+        2662.003982098161,
+        1474.86346427653
+      ],
+      "size": [
+        400,
+        340
+      ],
+      "flags": {},
+      "order": 41,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 49
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "ORM 2x2 @1024",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_pbr_sm/sand_sm_1024_orm_tilecheck_2x2"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_pbr_sm/sand_sm_1024_orm_tilecheck_2x2"
+      }
+    }
+  ],
+  "links": [
+    [
+      1,
+      2,
+      0,
+      3,
+      0,
+      "MODEL"
+    ],
+    [
+      2,
+      2,
+      1,
+      3,
+      1,
+      "CLIP"
+    ],
+    [
+      3,
+      3,
+      1,
+      4,
+      0,
+      "CLIP"
+    ],
+    [
+      4,
+      3,
+      1,
+      5,
+      0,
+      "CLIP"
+    ],
+    [
+      5,
+      3,
+      0,
+      7,
+      0,
+      "MODEL"
+    ],
+    [
+      6,
+      7,
+      0,
+      8,
+      0,
+      "MODEL"
+    ],
+    [
+      7,
+      4,
+      0,
+      8,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      8,
+      5,
+      0,
+      8,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      9,
+      6,
+      0,
+      8,
+      3,
+      "LATENT"
+    ],
+    [
+      10,
+      8,
+      0,
+      9,
+      0,
+      "LATENT"
+    ],
+    [
+      11,
+      2,
+      2,
+      9,
+      1,
+      "VAE"
+    ],
+    [
+      12,
+      9,
+      0,
+      10,
+      0,
+      "IMAGE"
+    ],
+    [
+      13,
+      9,
+      0,
+      11,
+      0,
+      "IMAGE"
+    ],
+    [
+      14,
+      11,
+      0,
+      12,
+      0,
+      "IMAGE"
+    ],
+    [
+      15,
+      13,
+      0,
+      14,
+      0,
+      "SM_PIPELINE"
+    ],
+    [
+      16,
+      11,
+      0,
+      14,
+      1,
+      "IMAGE"
+    ],
+    [
+      17,
+      14,
+      2,
+      15,
+      0,
+      "IMAGE"
+    ],
+    [
+      18,
+      15,
+      0,
+      16,
+      0,
+      "IMAGE"
+    ],
+    [
+      19,
+      14,
+      3,
+      16,
+      1,
+      "IMAGE"
+    ],
+    [
+      20,
+      14,
+      4,
+      16,
+      2,
+      "IMAGE"
+    ],
+    [
+      21,
+      14,
+      0,
+      19,
+      0,
+      "IMAGE"
+    ],
+    [
+      22,
+      14,
+      1,
+      20,
+      0,
+      "IMAGE"
+    ],
+    [
+      23,
+      14,
+      2,
+      21,
+      0,
+      "IMAGE"
+    ],
+    [
+      24,
+      16,
+      0,
+      22,
+      0,
+      "IMAGE"
+    ],
+    [
+      25,
+      14,
+      0,
+      17,
+      0,
+      "IMAGE"
+    ],
+    [
+      26,
+      17,
+      0,
+      23,
+      0,
+      "IMAGE"
+    ],
+    [
+      27,
+      16,
+      0,
+      18,
+      0,
+      "IMAGE"
+    ],
+    [
+      28,
+      18,
+      0,
+      24,
+      0,
+      "IMAGE"
+    ],
+    [
+      29,
+      25,
+      0,
+      26,
+      0,
+      "UPSCALE_MODEL"
+    ],
+    [
+      30,
+      25,
+      0,
+      27,
+      0,
+      "UPSCALE_MODEL"
+    ],
+    [
+      31,
+      14,
+      0,
+      26,
+      1,
+      "IMAGE"
+    ],
+    [
+      32,
+      14,
+      2,
+      27,
+      1,
+      "IMAGE"
+    ],
+    [
+      33,
+      14,
+      1,
+      28,
+      0,
+      "IMAGE"
+    ],
+    [
+      34,
+      14,
+      3,
+      29,
+      0,
+      "IMAGE"
+    ],
+    [
+      35,
+      14,
+      4,
+      30,
+      0,
+      "IMAGE"
+    ],
+    [
+      36,
+      27,
+      0,
+      31,
+      0,
+      "IMAGE"
+    ],
+    [
+      37,
+      31,
+      0,
+      32,
+      0,
+      "IMAGE"
+    ],
+    [
+      38,
+      29,
+      0,
+      32,
+      1,
+      "IMAGE"
+    ],
+    [
+      39,
+      30,
+      0,
+      32,
+      2,
+      "IMAGE"
+    ],
+    [
+      40,
+      26,
+      0,
+      36,
+      0,
+      "IMAGE"
+    ],
+    [
+      41,
+      27,
+      0,
+      37,
+      0,
+      "IMAGE"
+    ],
+    [
+      42,
+      28,
+      0,
+      38,
+      0,
+      "IMAGE"
+    ],
+    [
+      43,
+      32,
+      0,
+      39,
+      0,
+      "IMAGE"
+    ],
+    [
+      44,
+      26,
+      0,
+      33,
+      0,
+      "IMAGE"
+    ],
+    [
+      45,
+      33,
+      0,
+      40,
+      0,
+      "IMAGE"
+    ],
+    [
+      46,
+      28,
+      0,
+      34,
+      0,
+      "IMAGE"
+    ],
+    [
+      47,
+      34,
+      0,
+      41,
+      0,
+      "IMAGE"
+    ],
+    [
+      48,
+      32,
+      0,
+      35,
+      0,
+      "IMAGE"
+    ],
+    [
+      49,
+      35,
+      0,
+      42,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "① 无缝 albedo（SDXL + 沙砾 LoRA，改 padding 而非后处理）",
+      "bounding": [
+        -2335.7435523999993,
+        57.13846714,
+        2010,
+        1062
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "② 周期化降采样 1024→512（area = 2x2 均值，严格保持周期）",
+      "bounding": [
+        -883.8046900000004,
+        509.28481000000005,
+        540,
+        734
+      ],
+      "color": "#8A6",
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "③ StableMaterials：albedo + 提示词 → 5 张严格对齐贴图",
+      "bounding": [
+        -290,
+        70,
+        580,
+        844
+      ],
+      "color": "#A68",
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "④ SM 原生 512 组 + ORM + 2x2 自检",
+      "bounding": [
+        347.0395630000002,
+        70,
+        1048.8737651301626,
+        1715.8830294342458
+      ],
+      "color": "#88A",
+      "flags": {}
+    },
+    {
+      "id": 5,
+      "title": "⑤ 放大到 1024：basecolor/height 超分，normal 从 height 重导",
+      "bounding": [
+        1515.8409182228213,
+        71.4640599699357,
+        2177.2964271379988,
+        1809.345284091001
+      ],
+      "color": "#A88",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.2633312543060801,
+      "offset": [
+        1291.6166311973366,
+        1119.8245169311233
+      ]
+    },
+    "frontendVersion": "1.53.6",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}

@@ -1,0 +1,2336 @@
+{
+  "id": "1b616040-5ecc-540c-81a4-4caa50a4a233",
+  "revision": 0,
+  "last_node_id": 74,
+  "last_link_id": 47,
+  "nodes": [
+    {
+      "id": 10,
+      "type": "MarkdownNote",
+      "pos": [
+        -3439.5537280398466,
+        1052.6578209838667
+      ],
+      "size": [
+        600,
+        900
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "读我 · 方法与实测依据",
+      "properties": {
+        "Node name for S&R": "MarkdownNote"
+      },
+      "widgets_values": [
+        "# v2 材质图 → PBR 全套（几何反演路线）\n\n## 这条链路在做什么\n\nv2 LoRA 训练集是**受光渲染图**（caption 里绑死了 `directional sunlight from upper left`\n/ `raking light` / `visible bump relief with soft cast shadows`），它画出来的是**带明暗的表面**，\n亮度里已经含有起伏信息。所以问题不是\"凭空生成其他通道\"，而是**把光照反演掉**：\n\n```\nlit render（环面 padding，严格四方连续）\n   │\n   ├─ ★ DSINE 法线（纯卷积 · 周期补边 · fov 3°）→ 整平基面 ⇒ 主几何源\n   │        └─────────────> normal_dsine（环绕倍数 1.39 / 1.44）\n   │              │\n   │        周期泊松积分（FFT，精确周期）+ 低频剔除\n   │              v\n   │           height ──> 圆環中心差分 ──> normal   ← 主法线输出（严格四方连续）\n   │              ├──> 空腔法 ──> AO\n   │              └──> 微起伏能量 ──> roughness\n   │\n   ├─ MoGe-2 法线头（周期补边 · 对照支路）→ 整平 ⇒ normal_moge（环绕 1.82 / 1.63）\n   ├─ 平场除法（低频光照）──> albedo\n   └──────────────────────> ORM 打包\n```\n\n### 为什么几何源从 MoGe 换成了 DSINE\n\nMoGe-2 是 **ViT**：全局注意力 + 绝对位置编码使每个输出像素都依赖整场 ⇒ 补边**修不干净**，\npad 0→512 只把环绕倍数从 4.24 压到约 1.6 的**平台**，永远到不了 1.0（没有\"已收敛的内部\"可裁）。\n\nDSINE（CVPR 2024）是**纯卷积**：`tf_efficientnet_b5` 编码器 + 卷积解码器 + ConvGRU，\n**0 个注意力模块、无 learned pos_embed**（程序化验证过）。它的边界影响会**真的衰减**\n（border-ref 0.0280 → 0.0048 走 pad 0→768）——**但\"是卷积\"本身还不够**：\n\n> ★ DSINE 把**逐像素光线方向**当输入，那是个**绝对位置场**，本身不周期。\n> 在默认 `fov=60` 下补边**完全无效甚至更差**（环绕倍数 6.87 → 5.45）；把 FOV 压小才崩溃式下降。\n> 材质图本来就没有相机，`fov→0` 就是正交观测，物理上反而更对。\n\n两因素交互实测（环绕倍数 H，列是 pad）：\n\n| fov | pad 0 | 128 | 256 | 512 |\n|---|---|---|---|---|\n| 60（DSINE 默认） | 6.87 | 4.74 | 4.97 | 5.45 ← 补边没用 |\n| 20 | 4.44 | 2.24 | 2.13 | 2.29 |\n| 10 | 4.21 | 1.64 | 1.47 | 1.57 |\n| 5 | 4.20 | 1.36 | 1.19 | 1.25 |\n| **3（本工作流）** | 4.24 | 1.29 | **1.11** | 1.14 |\n| 1.5 | 4.29 | 1.25 | 1.08 | 1.08 |\n\n**fov=3 / pad=256 时环绕倍数 1.11、z=0.50** —— 统计上已与图内普通相邻差**无法区分**。\n\n同一判据下同一张图的三者对比（本工作流实跑，seed 20261013）：\n\n| | 环绕倍数 H / V | 平均倾角 | corr(\\|∇n\\|, \\|∇I\\|) |\n|---|---|---|---|\n| MoGe ViT（pad 1024，单模型对照） | 1.77 / 2.68 | 7.64° | 0.106 |\n| **DSINE 卷积（fov 3, pad 256，单模型对照）** | **1.11 / 1.64** | **15.08°** | **0.267** |\n| 本工作流 `normal_moge`（整平后） | 1.82 / 1.63 | 4.46° | — |\n| 本工作流 `normal_dsine`（整平后） | 1.39 / 1.44 | 16.58° | — |\n| **★ 本工作流 `normal`（最终主输出，从 height 重导）** | **1.04 / 0.96** | **22.05°** | — |\n\n那一列 `corr(|∇n|,|∇I|)` 值得看：DSINE 的起伏与图像边缘的吻合度是 MoGe 的 **2.5×**\n（它起伏强 3.5×，远景看反而像\"圆润泡沫\"）——**别用肉眼看图判断谁保真**。\n\n### ★ Blender 端到端复核（换源前后，同一机位同一盏灯）\n\n平铺 6×6 顶光渲染，取 5 个\"瓦片内部\"的接缝列做**集合级蒙特卡洛检验**（抽同样列数比 z 均值）：\n\n| 渲染 | 水平 p | 垂直 p | 判定 |\n|---|---|---|---|\n| **含法线图（DSINE 源，本版）** | **39.18%** | **99.87%** | **不显著 —— 残差消失** |\n| 含法线图（MoGe 源，上一版） | **0.00%** | **0.07%** | 显著，正是上次测到的那道残差 |\n| 无法线图（消融对照） | 84.21% | 100.00% | 不显著 |\n\n⇒ **换几何源把唯一可测出的接缝彻底消掉了**，而且视觉上低频重复也明显减弱\n（DSINE 的场低频结构更少，平铺时不再出现 MoGe 那种波浪状\"绗缝\"图案）。\n同时 normal↔height 自洽性也变好：法线图渲染 vs 仅 height 走 Bump，亮度\n**corr +0.8649**（旧 +0.7549）。\n\n⚠️ **通道符号是实测出来的，不是推的。** DSINE 相机系是 (right, down, front)，本项目贴图是\nOpenGL 风格（法线图 Y 轴向上）⇒ 转换恰好是**只翻转红通道**。四条独立证据一致：对 MoGe 的\n互相关、合成高度场真值、单轴解析标定、以及一张对照运行证明合成图没有镜像。\n顺带一个坑：**std / tilt / |n_xy| 这类标量统计量对通道翻转完全不变**，判断通道符号只能用\n\"与已知约定场的相关性\"。想看这个开关的效果把 `flip_red` 关掉对比即可。\n\n⚠️ **顺带得到的方法论**：补边能否治好接缝，取决于算子的三个性质 ——\n① 感受野有界（卷积）② **无绝对位置输入** ③ 无全局归一化（注意力 softmax / 空间 BN）。\n**缺一条，补边就是白费。**（MoGe 卡在 ②③；DSINE 只卡 ②，而 ② 对它可以用 FOV 压平。）\n\n### height 从法线积分，不从 depth\n\nMoGe 的 depth 头高频含量只有渲染图的 4–12%，法线头高得多；DSINE 干脆只有法线输出。\n所以 height 一律由法线做**周期泊松积分**得到。这一段的细节见下节。\n\n## height 必须做低频剔除，否则既难看又不可用\n\n积分按 `1/k²` 放大低频 ⇒ 高度会被输入梯度场里**散度为零的慢漂移**主导，形成一个\"碗形\"\n大偏置。不剔除的后果是实测过的：值域被这个碗占满、梯度被压掉 35–50 倍（`bump_strength`\n得开到 55 才有 20°），而且平铺时那个碗每块都重复一次，看着像明显的斑块/条带，不像材质。\n`SeamlessHeightFromNormal.low_freq_radius`（默认 96px）把它减掉：`bump_strength` 回到正常\n的 20 上下，height 也终于像一张置换图。这个高通是圆環模糊，所以**不影响无缝性**。\n\n### 最终主法线为什么还要\"积分再微分\"\n\nheight 是周期泊松积分（FFT）出来的 ⇒ **积分算子本身就是周期的**，下游的圆環中心差分同理 ⇒\n由 height 重导的法线**构造上严格周期**，而且它正是\"与 height 最一致的那个法线\"——\n这对贴图集是必要的：AO 和 roughness 都由 height 导出，若主法线另走一套，渲染时起伏会对不上。\n信息上也不亏：积分再微分对场的**可积部分**是恒等变换，只丢掉估计器法线里不可积的**旋度分量**\n（那部分本来就不对应任何真实曲面）。逐通道复核过：`corr(-n.x, dh/dx) = +0.975`、\n`corr(+n.y, dh/dy) = +0.971`。而且**实测这条路线比直接用源法线更无缝**：\n`normal` 1.04/0.96 vs `normal_dsine` 直出 1.39/1.44 —— 因为积分把源法线里不可积的分量丢掉了，\n剩下的部分**构造上**就是周期的。`normal_dsine` 留作对照。\n\n### ★★★ height 的归一化不能用硬截断（2026-10-12 修）\n\n`_percentile_norm` 的结尾是 `.clamp(0.0, 1.0)`。height 会被**求差分**变成法线，所以值域上\n任何硬限幅都会变成一块零梯度平台，而零梯度平台就是**一个死平的面**。实测：上下各 0.5% 的\n像素被压成 30 个连通块，块内部 `dh == 0`、法线恒为 `(0,0,1)`，最大一块 1600 px ——\n肉眼就是\"几个石块的顶被切平了\"。而且这两段尾部是**真实几何**不是离群噪声：分别占值域的\n13.5% / 26.0%，却只承载 0.5% 的像素，所以换个更宽的百分位只是把切口挪小，挪不掉。\n\n改用 `_monotone_norm`：分位数锚定的**分段线性**映射（六个节点，每段斜率严格为正，\n构造上不可能出现平台）。\n\n| | float 平台像素 | 落盘最大平块 | bulk 幅度 |\n|---|---|---|---|\n| 旧 `.clamp(0,1)` | 8003（最大块 1690） | 1695 px | ×1.00 |\n| **新 `headroom=0.15`** | **2（最大块 1）** | **85 px** | **×0.70** |\n\n中间 99%（`q0.005..q0.995`）在两种映射下都是**严格线性**的，所以这只是幅度变化：\n`bump_strength` 22 → **31.4** 即完全等价。稳健性也保住了 —— 中间段的斜率只由 `headroom`\n钉住，一个极端离群点最多把最外侧那段（0.05% 像素）压浅，动不了主体。\n\n## 为什么不用 StableMaterials\n\n它只做**全局**图像条件（CLIP-Vision 池化成一个 768 token），实测\"打乱块\"与\"换纯色\"的距离\n几乎相同（0.084 vs 0.083）⇒ 没有空间对应，是重新合成而不是通道转换，height/normal 与输入\nalbedo 对不上。这条链路换成**逐像素**的几何反演。\n\n## 关键测量（都是实测，不是估计）\n\n| 事项 | 结果 |\n|---|---|\n| 这些估计器能否从受光材质图恢复起伏 | **能**。逐颗砾石外倾、沙漠波纹坡向都清晰；MoGe 平均倾角 6–14°，DSINE 15° |\n| 它们是不是\"真实反演\" | **不是全对**。最佳单光源只解释亮度方差的 R²=0.10–0.72（只看高频段 0.01–0.47），拟合光向多数与 caption 的左上光不符 ⇒ 是**神经先验**，可以当输入用，不能当 ground truth |\n| ⚠️ 单光源在材质图上几乎无判别力 | 单 Lambertian 拟合在这个砾石渲染上的**高频 R² 只有 0.023–0.026** ⇒ 这张图的亮度里约 **2.5% 是明暗、97.5% 是反照率**。凡是靠\"拟合光源方向\"来判断法线对错的测试，在这里都没有效力 |\n| MoGe 直接喂能否保持无缝 | **不能**。环绕不连续是图内中位差的 **4.24×**（硬接缝），因为网络在图像边界零填充 |\n| MoGe 周期补边能修好吗 | **只能部分**。pad 0→512 把比值从 4.24 压到 1.62 并收敛到平台，但不会到 1.0（原因见上）。pad 越大越贵 |\n| DSINE 直接喂呢 | 同样不行（fov 60 时 6.87），但**换 FOV 后能真正收敛**到 1.11 —— 见上文交互表 |\n| depth 头能用吗 | 不建议。MoGe depth 的高频含量只有渲染图的 4–12%，法线头高得多 ⇒ height 从**法线积分**得到，不从 depth |\n| 去光照做了多少 | 渲染图本身**大尺度亮度已经很平**（块 64 的粗尺度 std 仅 0.018）。半径 128 的平场除法在块 128 削掉 26% ⇒ 剩下的明暗在**起伏尺度**上，没有可信法线就无法分离 |\n\n⚠️ **`refine_steps` 对本工作流无效（但不是空转）**：ComfyUI 0.38.2 的 `MoGeInference` 已经声明并\n真的把 `refine_steps` 透传给 `MoGeModel.infer`，只是后者仅在 `version == \"v3\"` 时下发给模型\n（tooltip 原文：*MoGe-3 only ... Ignored by MoGe-1 / MoGe-2*）。本工作流用 MoGe-2 权重，所以它被忽略。\n\n⚠️ **真分辨率旋钮是 `resolution_level`（0–9）**，节点上**没有** `num_tokens` 输入。核心内部换算\n`num_tokens = int(lo + level/9*(hi-lo))`，MoGe v2 的 `num_tokens_range = (1200, 3600)` ⇒ level 9 = 3600。\n\n## 节点里最该动的参数\n\n- ★ `SeamlessDSINENormal.fov`（默认 **3**，不是 DSINE 官方的 60）：**第一旋钮**。它是射线方向\n  先验的强度，也是接缝的根源。60 → 补边无效；3 → 环绕 1.11。材质图是平的，小 fov 物理上也更对。\n  再往下压到 1.5 只多拿 0.03，不值得。\n- `SeamlessDSINENormal.pad`（默认 256）：边界影响压到收敛底。0→768 只从 0.0280 降到 0.0048，\n  256 已经到底；再大只涨算力。\n- `SeamlessDSINENormal.iterations`（默认 5）：ConvGRU 轮数，实测**几乎是空旋钮**\n  （3→20 只让环绕 1.12→1.14）。别在这上面花时间。\n- `SeamlessDSINENormal.flip_red`（默认 True）：通道符号。关掉只为做对照 —— 关掉后与 MoGe 的\n  相关性会从 +0.63 掉到 **−0.63**（即起伏全部反向）。\n- `SeamlessHeightFromNormal.low_freq_radius`（默认 96）：剔除多慢的起伏。积分按 1/k² 放大\n  低频，不剔的话值域会被一个\"碗形漂移\"占满（平铺时表现为明显的重复斑块，且梯度被压掉\n  35–50 倍）。96 是实测的甜点。\n- `SeamlessNormalFromHeight.bump_strength`（默认 22）：最终法线的**唯一坡度旋钮**，≈21° 平均\n  倾角。细砂可降到 12–16，粗砾石 22–30。看 2x2 预览调。\n- `SeamlessDelightAlbedo.radius`（默认 128）：多大的尺度算\"光照\"。调小会开始吃掉材质本身。\n- `SeamlessRoughnessFromHeight`：想严格就 `min == max` 钉成常数。\n- 对照支路（MoGe）：`SeamlessMoGeInference.pad` 默认 256，512 更好但算力 ×4。别指望归零。\n\n## 已知限制（诚实版）\n\n1. **albedo 的去光照只去低频**。半径 128 的平场除法能抹掉全局光照梯度/暗角/大幅软阴影，\n   但**起伏尺度的明暗留在 albedo 里**。要彻底分离需要可信法线来除以 `n·L` —— 但**两个估计器\n   都达不到那个可信度**：单 Lambertian 拟合的高频 R² 只有 0.023–0.026（这张渲染的亮度里\n   约 97.5% 是反照率而非明暗）。所以这不是\"换个更强的模型\"能解决的，是**数据本身没有信息**。\n2. **roughness 是代理量，不是测量值**。渲染里没有镜面高光 ⇒ 没有任何东西真正观测到\n   roughness。这里用高度微起伏能量映射到区间（比旧版\"按 albedo 亮度\"有依据），但想严格\n   就设 `min == max`。\n3. **想真正解决，要回到训练侧**：给 v2 加**光照方向增广**（同材质多光源重训），就能做真正的\n   光度立体 —— 数学上精确的法线 + 精确去光照 + 精确 roughness。这是明确可执行的升级路径，\n   也是本链路唯一的原理性缺口。**另一个可选升级**：在训练集里补上 Poly Haven 的\n   `_nor_gl` 通道并加独立 caption 前缀，让 LoRA 直接能画法线。\n\n## 自检\n\n每个通道都有 `2x2 tile check`。单张图看不出接缝，**只有平铺才暴露**。\n数值判据：\n- `.workbuddy/verify_pbr_v2.py` —— 全套 7 张贴图的环绕倍数、法线单位长度、基面残差、\n  倾角、ORM 通道布局。\n- `.workbuddy/verify_dsine_node.py` —— 专测 `SeamlessDSINENormal`：与 MoGe 的约定一致性\n  （含 `flip_red=false` 对照）、接缝、起伏幅度。\n- `.workbuddy/analyze_conv_vs_vit.py` —— 卷积 vs ViT 的统一判据（含频带匹配的 `excHF`）。\n\n## 环境（0.38.2）\n\n运行时源码目录是 **`...\\Comfy-Desktop\\ComfyUI-Installs\\ComfyUI\\ComfyUI`**（双层同名），\n不要读 `...\\Programs\\ComfyUI\resources\\ComfyUI`（那是 Desktop 自带的旧引导副本，运行时不加载）。\n权威取证看 `...\\Comfy-Desktop\\ComfyUI-Installs\\ComfyUI\\logs\\comfyui.log` 开头的 `** ComfyUI Path:`。\n运行时 python：`...\\Programs\\ComfyUI-data\\.venv\\Scripts\\python.exe`（3.12 + torch 2.10）。\n"
+      ],
+      "widgets_values_named": {
+        "text": "# v2 材质图 → PBR 全套（几何反演路线）\n\n## 这条链路在做什么\n\nv2 LoRA 训练集是**受光渲染图**（caption 里绑死了 `directional sunlight from upper left`\n/ `raking light` / `visible bump relief with soft cast shadows`），它画出来的是**带明暗的表面**，\n亮度里已经含有起伏信息。所以问题不是\"凭空生成其他通道\"，而是**把光照反演掉**：\n\n```\nlit render（环面 padding，严格四方连续）\n   │\n   ├─ ★ DSINE 法线（纯卷积 · 周期补边 · fov 3°）→ 整平基面 ⇒ 主几何源\n   │        └─────────────> normal_dsine（环绕倍数 1.39 / 1.44）\n   │              │\n   │        周期泊松积分（FFT，精确周期）+ 低频剔除\n   │              v\n   │           height ──> 圆環中心差分 ──> normal   ← 主法线输出（严格四方连续）\n   │              ├──> 空腔法 ──> AO\n   │              └──> 微起伏能量 ──> roughness\n   │\n   ├─ MoGe-2 法线头（周期补边 · 对照支路）→ 整平 ⇒ normal_moge（环绕 1.82 / 1.63）\n   ├─ 平场除法（低频光照）──> albedo\n   └──────────────────────> ORM 打包\n```\n\n### 为什么几何源从 MoGe 换成了 DSINE\n\nMoGe-2 是 **ViT**：全局注意力 + 绝对位置编码使每个输出像素都依赖整场 ⇒ 补边**修不干净**，\npad 0→512 只把环绕倍数从 4.24 压到约 1.6 的**平台**，永远到不了 1.0（没有\"已收敛的内部\"可裁）。\n\nDSINE（CVPR 2024）是**纯卷积**：`tf_efficientnet_b5` 编码器 + 卷积解码器 + ConvGRU，\n**0 个注意力模块、无 learned pos_embed**（程序化验证过）。它的边界影响会**真的衰减**\n（border-ref 0.0280 → 0.0048 走 pad 0→768）——**但\"是卷积\"本身还不够**：\n\n> ★ DSINE 把**逐像素光线方向**当输入，那是个**绝对位置场**，本身不周期。\n> 在默认 `fov=60` 下补边**完全无效甚至更差**（环绕倍数 6.87 → 5.45）；把 FOV 压小才崩溃式下降。\n> 材质图本来就没有相机，`fov→0` 就是正交观测，物理上反而更对。\n\n两因素交互实测（环绕倍数 H，列是 pad）：\n\n| fov | pad 0 | 128 | 256 | 512 |\n|---|---|---|---|---|\n| 60（DSINE 默认） | 6.87 | 4.74 | 4.97 | 5.45 ← 补边没用 |\n| 20 | 4.44 | 2.24 | 2.13 | 2.29 |\n| 10 | 4.21 | 1.64 | 1.47 | 1.57 |\n| 5 | 4.20 | 1.36 | 1.19 | 1.25 |\n| **3（本工作流）** | 4.24 | 1.29 | **1.11** | 1.14 |\n| 1.5 | 4.29 | 1.25 | 1.08 | 1.08 |\n\n**fov=3 / pad=256 时环绕倍数 1.11、z=0.50** —— 统计上已与图内普通相邻差**无法区分**。\n\n同一判据下同一张图的三者对比（本工作流实跑，seed 20261013）：\n\n| | 环绕倍数 H / V | 平均倾角 | corr(\\|∇n\\|, \\|∇I\\|) |\n|---|---|---|---|\n| MoGe ViT（pad 1024，单模型对照） | 1.77 / 2.68 | 7.64° | 0.106 |\n| **DSINE 卷积（fov 3, pad 256，单模型对照）** | **1.11 / 1.64** | **15.08°** | **0.267** |\n| 本工作流 `normal_moge`（整平后） | 1.82 / 1.63 | 4.46° | — |\n| 本工作流 `normal_dsine`（整平后） | 1.39 / 1.44 | 16.58° | — |\n| **★ 本工作流 `normal`（最终主输出，从 height 重导）** | **1.04 / 0.96** | **22.05°** | — |\n\n那一列 `corr(|∇n|,|∇I|)` 值得看：DSINE 的起伏与图像边缘的吻合度是 MoGe 的 **2.5×**\n（它起伏强 3.5×，远景看反而像\"圆润泡沫\"）——**别用肉眼看图判断谁保真**。\n\n### ★ Blender 端到端复核（换源前后，同一机位同一盏灯）\n\n平铺 6×6 顶光渲染，取 5 个\"瓦片内部\"的接缝列做**集合级蒙特卡洛检验**（抽同样列数比 z 均值）：\n\n| 渲染 | 水平 p | 垂直 p | 判定 |\n|---|---|---|---|\n| **含法线图（DSINE 源，本版）** | **39.18%** | **99.87%** | **不显著 —— 残差消失** |\n| 含法线图（MoGe 源，上一版） | **0.00%** | **0.07%** | 显著，正是上次测到的那道残差 |\n| 无法线图（消融对照） | 84.21% | 100.00% | 不显著 |\n\n⇒ **换几何源把唯一可测出的接缝彻底消掉了**，而且视觉上低频重复也明显减弱\n（DSINE 的场低频结构更少，平铺时不再出现 MoGe 那种波浪状\"绗缝\"图案）。\n同时 normal↔height 自洽性也变好：法线图渲染 vs 仅 height 走 Bump，亮度\n**corr +0.8649**（旧 +0.7549）。\n\n⚠️ **通道符号是实测出来的，不是推的。** DSINE 相机系是 (right, down, front)，本项目贴图是\nOpenGL 风格（法线图 Y 轴向上）⇒ 转换恰好是**只翻转红通道**。四条独立证据一致：对 MoGe 的\n互相关、合成高度场真值、单轴解析标定、以及一张对照运行证明合成图没有镜像。\n顺带一个坑：**std / tilt / |n_xy| 这类标量统计量对通道翻转完全不变**，判断通道符号只能用\n\"与已知约定场的相关性\"。想看这个开关的效果把 `flip_red` 关掉对比即可。\n\n⚠️ **顺带得到的方法论**：补边能否治好接缝，取决于算子的三个性质 ——\n① 感受野有界（卷积）② **无绝对位置输入** ③ 无全局归一化（注意力 softmax / 空间 BN）。\n**缺一条，补边就是白费。**（MoGe 卡在 ②③；DSINE 只卡 ②，而 ② 对它可以用 FOV 压平。）\n\n### height 从法线积分，不从 depth\n\nMoGe 的 depth 头高频含量只有渲染图的 4–12%，法线头高得多；DSINE 干脆只有法线输出。\n所以 height 一律由法线做**周期泊松积分**得到。这一段的细节见下节。\n\n## height 必须做低频剔除，否则既难看又不可用\n\n积分按 `1/k²` 放大低频 ⇒ 高度会被输入梯度场里**散度为零的慢漂移**主导，形成一个\"碗形\"\n大偏置。不剔除的后果是实测过的：值域被这个碗占满、梯度被压掉 35–50 倍（`bump_strength`\n得开到 55 才有 20°），而且平铺时那个碗每块都重复一次，看着像明显的斑块/条带，不像材质。\n`SeamlessHeightFromNormal.low_freq_radius`（默认 96px）把它减掉：`bump_strength` 回到正常\n的 20 上下，height 也终于像一张置换图。这个高通是圆環模糊，所以**不影响无缝性**。\n\n### 最终主法线为什么还要\"积分再微分\"\n\nheight 是周期泊松积分（FFT）出来的 ⇒ **积分算子本身就是周期的**，下游的圆環中心差分同理 ⇒\n由 height 重导的法线**构造上严格周期**，而且它正是\"与 height 最一致的那个法线\"——\n这对贴图集是必要的：AO 和 roughness 都由 height 导出，若主法线另走一套，渲染时起伏会对不上。\n信息上也不亏：积分再微分对场的**可积部分**是恒等变换，只丢掉估计器法线里不可积的**旋度分量**\n（那部分本来就不对应任何真实曲面）。逐通道复核过：`corr(-n.x, dh/dx) = +0.975`、\n`corr(+n.y, dh/dy) = +0.971`。而且**实测这条路线比直接用源法线更无缝**：\n`normal` 1.04/0.96 vs `normal_dsine` 直出 1.39/1.44 —— 因为积分把源法线里不可积的分量丢掉了，\n剩下的部分**构造上**就是周期的。`normal_dsine` 留作对照。\n\n### ★★★ height 的归一化不能用硬截断（2026-10-12 修）\n\n`_percentile_norm` 的结尾是 `.clamp(0.0, 1.0)`。height 会被**求差分**变成法线，所以值域上\n任何硬限幅都会变成一块零梯度平台，而零梯度平台就是**一个死平的面**。实测：上下各 0.5% 的\n像素被压成 30 个连通块，块内部 `dh == 0`、法线恒为 `(0,0,1)`，最大一块 1600 px ——\n肉眼就是\"几个石块的顶被切平了\"。而且这两段尾部是**真实几何**不是离群噪声：分别占值域的\n13.5% / 26.0%，却只承载 0.5% 的像素，所以换个更宽的百分位只是把切口挪小，挪不掉。\n\n改用 `_monotone_norm`：分位数锚定的**分段线性**映射（六个节点，每段斜率严格为正，\n构造上不可能出现平台）。\n\n| | float 平台像素 | 落盘最大平块 | bulk 幅度 |\n|---|---|---|---|\n| 旧 `.clamp(0,1)` | 8003（最大块 1690） | 1695 px | ×1.00 |\n| **新 `headroom=0.15`** | **2（最大块 1）** | **85 px** | **×0.70** |\n\n中间 99%（`q0.005..q0.995`）在两种映射下都是**严格线性**的，所以这只是幅度变化：\n`bump_strength` 22 → **31.4** 即完全等价。稳健性也保住了 —— 中间段的斜率只由 `headroom`\n钉住，一个极端离群点最多把最外侧那段（0.05% 像素）压浅，动不了主体。\n\n## 为什么不用 StableMaterials\n\n它只做**全局**图像条件（CLIP-Vision 池化成一个 768 token），实测\"打乱块\"与\"换纯色\"的距离\n几乎相同（0.084 vs 0.083）⇒ 没有空间对应，是重新合成而不是通道转换，height/normal 与输入\nalbedo 对不上。这条链路换成**逐像素**的几何反演。\n\n## 关键测量（都是实测，不是估计）\n\n| 事项 | 结果 |\n|---|---|\n| 这些估计器能否从受光材质图恢复起伏 | **能**。逐颗砾石外倾、沙漠波纹坡向都清晰；MoGe 平均倾角 6–14°，DSINE 15° |\n| 它们是不是\"真实反演\" | **不是全对**。最佳单光源只解释亮度方差的 R²=0.10–0.72（只看高频段 0.01–0.47），拟合光向多数与 caption 的左上光不符 ⇒ 是**神经先验**，可以当输入用，不能当 ground truth |\n| ⚠️ 单光源在材质图上几乎无判别力 | 单 Lambertian 拟合在这个砾石渲染上的**高频 R² 只有 0.023–0.026** ⇒ 这张图的亮度里约 **2.5% 是明暗、97.5% 是反照率**。凡是靠\"拟合光源方向\"来判断法线对错的测试，在这里都没有效力 |\n| MoGe 直接喂能否保持无缝 | **不能**。环绕不连续是图内中位差的 **4.24×**（硬接缝），因为网络在图像边界零填充 |\n| MoGe 周期补边能修好吗 | **只能部分**。pad 0→512 把比值从 4.24 压到 1.62 并收敛到平台，但不会到 1.0（原因见上）。pad 越大越贵 |\n| DSINE 直接喂呢 | 同样不行（fov 60 时 6.87），但**换 FOV 后能真正收敛**到 1.11 —— 见上文交互表 |\n| depth 头能用吗 | 不建议。MoGe depth 的高频含量只有渲染图的 4–12%，法线头高得多 ⇒ height 从**法线积分**得到，不从 depth |\n| 去光照做了多少 | 渲染图本身**大尺度亮度已经很平**（块 64 的粗尺度 std 仅 0.018）。半径 128 的平场除法在块 128 削掉 26% ⇒ 剩下的明暗在**起伏尺度**上，没有可信法线就无法分离 |\n\n⚠️ **`refine_steps` 对本工作流无效（但不是空转）**：ComfyUI 0.38.2 的 `MoGeInference` 已经声明并\n真的把 `refine_steps` 透传给 `MoGeModel.infer`，只是后者仅在 `version == \"v3\"` 时下发给模型\n（tooltip 原文：*MoGe-3 only ... Ignored by MoGe-1 / MoGe-2*）。本工作流用 MoGe-2 权重，所以它被忽略。\n\n⚠️ **真分辨率旋钮是 `resolution_level`（0–9）**，节点上**没有** `num_tokens` 输入。核心内部换算\n`num_tokens = int(lo + level/9*(hi-lo))`，MoGe v2 的 `num_tokens_range = (1200, 3600)` ⇒ level 9 = 3600。\n\n## 节点里最该动的参数\n\n- ★ `SeamlessDSINENormal.fov`（默认 **3**，不是 DSINE 官方的 60）：**第一旋钮**。它是射线方向\n  先验的强度，也是接缝的根源。60 → 补边无效；3 → 环绕 1.11。材质图是平的，小 fov 物理上也更对。\n  再往下压到 1.5 只多拿 0.03，不值得。\n- `SeamlessDSINENormal.pad`（默认 256）：边界影响压到收敛底。0→768 只从 0.0280 降到 0.0048，\n  256 已经到底；再大只涨算力。\n- `SeamlessDSINENormal.iterations`（默认 5）：ConvGRU 轮数，实测**几乎是空旋钮**\n  （3→20 只让环绕 1.12→1.14）。别在这上面花时间。\n- `SeamlessDSINENormal.flip_red`（默认 True）：通道符号。关掉只为做对照 —— 关掉后与 MoGe 的\n  相关性会从 +0.63 掉到 **−0.63**（即起伏全部反向）。\n- `SeamlessHeightFromNormal.low_freq_radius`（默认 96）：剔除多慢的起伏。积分按 1/k² 放大\n  低频，不剔的话值域会被一个\"碗形漂移\"占满（平铺时表现为明显的重复斑块，且梯度被压掉\n  35–50 倍）。96 是实测的甜点。\n- `SeamlessNormalFromHeight.bump_strength`（默认 22）：最终法线的**唯一坡度旋钮**，≈21° 平均\n  倾角。细砂可降到 12–16，粗砾石 22–30。看 2x2 预览调。\n- `SeamlessDelightAlbedo.radius`（默认 128）：多大的尺度算\"光照\"。调小会开始吃掉材质本身。\n- `SeamlessRoughnessFromHeight`：想严格就 `min == max` 钉成常数。\n- 对照支路（MoGe）：`SeamlessMoGeInference.pad` 默认 256，512 更好但算力 ×4。别指望归零。\n\n## 已知限制（诚实版）\n\n1. **albedo 的去光照只去低频**。半径 128 的平场除法能抹掉全局光照梯度/暗角/大幅软阴影，\n   但**起伏尺度的明暗留在 albedo 里**。要彻底分离需要可信法线来除以 `n·L` —— 但**两个估计器\n   都达不到那个可信度**：单 Lambertian 拟合的高频 R² 只有 0.023–0.026（这张渲染的亮度里\n   约 97.5% 是反照率而非明暗）。所以这不是\"换个更强的模型\"能解决的，是**数据本身没有信息**。\n2. **roughness 是代理量，不是测量值**。渲染里没有镜面高光 ⇒ 没有任何东西真正观测到\n   roughness。这里用高度微起伏能量映射到区间（比旧版\"按 albedo 亮度\"有依据），但想严格\n   就设 `min == max`。\n3. **想真正解决，要回到训练侧**：给 v2 加**光照方向增广**（同材质多光源重训），就能做真正的\n   光度立体 —— 数学上精确的法线 + 精确去光照 + 精确 roughness。这是明确可执行的升级路径，\n   也是本链路唯一的原理性缺口。**另一个可选升级**：在训练集里补上 Poly Haven 的\n   `_nor_gl` 通道并加独立 caption 前缀，让 LoRA 直接能画法线。\n\n## 自检\n\n每个通道都有 `2x2 tile check`。单张图看不出接缝，**只有平铺才暴露**。\n数值判据：\n- `.workbuddy/verify_pbr_v2.py` —— 全套 7 张贴图的环绕倍数、法线单位长度、基面残差、\n  倾角、ORM 通道布局。\n- `.workbuddy/verify_dsine_node.py` —— 专测 `SeamlessDSINENormal`：与 MoGe 的约定一致性\n  （含 `flip_red=false` 对照）、接缝、起伏幅度。\n- `.workbuddy/analyze_conv_vs_vit.py` —— 卷积 vs ViT 的统一判据（含频带匹配的 `excHF`）。\n\n## 环境（0.38.2）\n\n运行时源码目录是 **`...\\Comfy-Desktop\\ComfyUI-Installs\\ComfyUI\\ComfyUI`**（双层同名），\n不要读 `...\\Programs\\ComfyUI\resources\\ComfyUI`（那是 Desktop 自带的旧引导副本，运行时不加载）。\n权威取证看 `...\\Comfy-Desktop\\ComfyUI-Installs\\ComfyUI\\logs\\comfyui.log` 开头的 `** ComfyUI Path:`。\n运行时 python：`...\\Programs\\ComfyUI-data\\.venv\\Scripts\\python.exe`（3.12 + torch 2.10）。\n"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 1,
+      "type": "CheckpointLoaderSimple",
+      "pos": [
+        -2700,
+        1090
+      ],
+      "size": [
+        350,
+        100
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            1
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            2
+          ]
+        },
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            11
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CheckpointLoaderSimple"
+      },
+      "widgets_values": [
+        "sd_xl_base_1.0.safetensors"
+      ],
+      "widgets_values_named": {
+        "ckpt_name": "sd_xl_base_1.0.safetensors"
+      }
+    },
+    {
+      "id": 2,
+      "type": "LoraLoader",
+      "pos": [
+        -2320,
+        1090
+      ],
+      "size": [
+        350,
+        130
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            5
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            3,
+            4
+          ]
+        }
+      ],
+      "title": "v2 LoRA（受光渲染版）",
+      "properties": {
+        "Node name for S&R": "LoraLoader"
+      },
+      "widgets_values": [
+        "sdxl-texture-sand-lora-v2.safetensors",
+        1,
+        1
+      ],
+      "widgets_values_named": {
+        "lora_name": "sdxl-texture-sand-lora-v2.safetensors",
+        "strength_model": 1,
+        "strength_clip": 1
+      }
+    },
+    {
+      "id": 3,
+      "type": "CLIPTextEncode",
+      "pos": [
+        -1940,
+        1230
+      ],
+      "size": [
+        470,
+        250
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            7
+          ]
+        }
+      ],
+      "title": "Positive · 9 个绑死 tag + 材质描述",
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "mtrlx, seamless tileable PBR material, coarse pebbly sand, beige and grey small stones, dense gravel aggregate, square top-down surface, directional sunlight from upper left, visible bump relief with soft cast shadows, raking light, crisp fine detail, high frequency texture, small scale pattern"
+      ],
+      "widgets_values_named": {
+        "text": "mtrlx, seamless tileable PBR material, coarse pebbly sand, beige and grey small stones, dense gravel aggregate, square top-down surface, directional sunlight from upper left, visible bump relief with soft cast shadows, raking light, crisp fine detail, high frequency texture, small scale pattern"
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 4,
+      "type": "CLIPTextEncode",
+      "pos": [
+        -1940,
+        1520
+      ],
+      "size": [
+        470,
+        250
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            8
+          ]
+        }
+      ],
+      "title": "Negative",
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "blurry, lowres, out of focus, jpeg artifacts, watermark, text, signature, logo, perspective view, side view, overcast, flat lighting, front lighting, lighting gradient, vignette, depth of field, bokeh, flat solid color, cartoon, painting, tiling seam, visible grid, tile border, depth map, normal map, displacement map, uv checker"
+      ],
+      "widgets_values_named": {
+        "text": "blurry, lowres, out of focus, jpeg artifacts, watermark, text, signature, logo, perspective view, side view, overcast, flat lighting, front lighting, lighting gradient, vignette, depth of field, bokeh, flat solid color, cartoon, painting, tiling seam, visible grid, tile border, depth map, normal map, displacement map, uv checker"
+      },
+      "color": "#223",
+      "bgcolor": "#335"
+    },
+    {
+      "id": 5,
+      "type": "EmptyLatentImage",
+      "pos": [
+        -1940,
+        1810
+      ],
+      "size": [
+        470,
+        106
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            9
+          ]
+        }
+      ],
+      "title": "1024 = SDXL 原生 + MoGe 档位 9 的甜点",
+      "properties": {
+        "Node name for S&R": "EmptyLatentImage"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        1
+      ],
+      "widgets_values_named": {
+        "width": 1024,
+        "height": 1024,
+        "batch_size": 1
+      }
+    },
+    {
+      "id": 6,
+      "type": "SeamlessModelPadding",
+      "pos": [
+        -1940,
+        1090
+      ],
+      "size": [
+        470,
+        100
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": [
+            6
+          ]
+        }
+      ],
+      "title": "关键：UNet 卷积改 circular → 环面拓扑",
+      "properties": {
+        "Node name for S&R": "SeamlessModelPadding"
+      },
+      "widgets_values": [
+        "circular"
+      ],
+      "widgets_values_named": {
+        "mode": "circular"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 7,
+      "type": "KSampler",
+      "pos": [
+        -1440,
+        1090
+      ],
+      "size": [
+        300,
+        290
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 6
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 7
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 8
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            10
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "KSampler"
+      },
+      "widgets_values": [
+        20261013,
+        "fixed",
+        30,
+        6.5,
+        "dpmpp_2m",
+        "karras",
+        1
+      ],
+      "widgets_values_named": {
+        "seed": 20261013,
+        "control_after_generate": "fixed",
+        "steps": 30,
+        "cfg": 6.5,
+        "sampler_name": "dpmpp_2m",
+        "scheduler": "karras",
+        "denoise": 1
+      }
+    },
+    {
+      "id": 8,
+      "type": "SeamlessVAEDecode",
+      "pos": [
+        -1100,
+        1050
+      ],
+      "size": [
+        330,
+        100
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 10
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 11
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            12,
+            13,
+            16,
+            23,
+            43
+          ]
+        }
+      ],
+      "title": "Seamless VAE Decode",
+      "properties": {
+        "Node name for S&R": "SeamlessVAEDecode"
+      },
+      "widgets_values": [
+        8
+      ],
+      "widgets_values_named": {
+        "margin": 8
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 20,
+      "type": "SaveImage",
+      "pos": [
+        -740,
+        1050
+      ],
+      "size": [
+        520,
+        560
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 12
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "受光渲染图（中间产物，不是 albedo）",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/pbr_v2/sand_v2_lit"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/pbr_v2/sand_v2_lit"
+      }
+    },
+    {
+      "id": 21,
+      "type": "TilePreview",
+      "pos": [
+        -116.95175229365209,
+        1057.491511248607
+      ],
+      "size": [
+        330,
+        100
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 13
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            47
+          ]
+        }
+      ],
+      "title": "Tile Preview · 2x2",
+      "properties": {
+        "Node name for S&R": "TilePreview"
+      },
+      "widgets_values": [
+        2,
+        2
+      ],
+      "widgets_values_named": {
+        "tiles_x": 2,
+        "tiles_y": 2
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 30,
+      "type": "LoadMoGeModel",
+      "pos": [
+        371.63277583073426,
+        1115.847177005935
+      ],
+      "size": [
+        470,
+        80
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MOGE_MODEL",
+          "type": "MOGE_MODEL",
+          "links": [
+            15
+          ]
+        }
+      ],
+      "title": "MoGe-2（自带 normal 头）",
+      "properties": {
+        "Node name for S&R": "LoadMoGeModel"
+      },
+      "widgets_values": [
+        "moge_2_vitl_normal_fp16.safetensors"
+      ],
+      "widgets_values_named": {
+        "model_name": "moge_2_vitl_normal_fp16.safetensors"
+      }
+    },
+    {
+      "id": 31,
+      "type": "SeamlessMoGeInference",
+      "pos": [
+        871.6327758307335,
+        1115.847177005935
+      ],
+      "size": [
+        470,
+        260
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "moge_model",
+          "type": "MOGE_MODEL",
+          "link": 15
+        },
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 16
+        }
+      ],
+      "outputs": [
+        {
+          "name": "moge_geometry",
+          "type": "MOGE_GEOMETRY",
+          "links": [
+            17,
+            18
+          ]
+        }
+      ],
+      "title": "周期补边 MoGe（pad 256 · token 按面积缩放）",
+      "properties": {
+        "Node name for S&R": "SeamlessMoGeInference"
+      },
+      "widgets_values": [
+        256,
+        true,
+        9,
+        0,
+        0,
+        1,
+        true,
+        false
+      ],
+      "widgets_values_named": {
+        "pad": 256,
+        "circular": true,
+        "resolution_level": 9,
+        "num_tokens": 0,
+        "fov_x_degrees": 0,
+        "batch_size": 1,
+        "force_projection": true,
+        "apply_mask": false
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 32,
+      "type": "MoGeRender",
+      "pos": [
+        1371.6327758307327,
+        1235.8471770059346
+      ],
+      "size": [
+        330,
+        80
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "moge_geometry",
+          "type": "MOGE_GEOMETRY",
+          "link": 17
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            20,
+            21
+          ]
+        }
+      ],
+      "title": "法线（OpenGL；UE 用 directx）",
+      "properties": {
+        "Node name for S&R": "MoGeRender"
+      },
+      "widgets_values": [
+        "normal_opengl"
+      ],
+      "widgets_values_named": {
+        "output": "normal_opengl"
+      }
+    },
+    {
+      "id": 33,
+      "type": "MoGeRender",
+      "pos": [
+        1371.6327758307327,
+        1115.847177005935
+      ],
+      "size": [
+        330,
+        80
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "moge_geometry",
+          "type": "MOGE_GEOMETRY",
+          "link": 18
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            19
+          ]
+        }
+      ],
+      "title": "depth（仅参考，HF 只有 4–12%）",
+      "properties": {
+        "Node name for S&R": "MoGeRender"
+      },
+      "widgets_values": [
+        "depth"
+      ],
+      "widgets_values_named": {
+        "output": "depth"
+      }
+    },
+    {
+      "id": 34,
+      "type": "SaveImage",
+      "pos": [
+        1725.6310098165823,
+        1109.4857127303478
+      ],
+      "size": [
+        470,
+        400
+      ],
+      "flags": {},
+      "order": 23,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 19
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "参考：MoGe depth",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/pbr_v2/sand_v2_moge_depth"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/pbr_v2/sand_v2_moge_depth"
+      }
+    },
+    {
+      "id": 35,
+      "type": "SeamlessDSINENormal",
+      "pos": [
+        -744.0071947847096,
+        2459.9537470061737
+      ],
+      "size": [
+        500,
+        154
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 23
+        }
+      ],
+      "outputs": [
+        {
+          "name": "normal",
+          "type": "IMAGE",
+          "links": [
+            24
+          ]
+        }
+      ],
+      "title": "★ 主几何源：DSINE（纯卷积）· fov 3° · pad 256",
+      "properties": {
+        "Node name for S&R": "SeamlessDSINENormal"
+      },
+      "widgets_values": [
+        3,
+        256,
+        5,
+        true,
+        false
+      ],
+      "widgets_values_named": {
+        "fov": 3,
+        "pad": 256,
+        "iterations": 5,
+        "flip_red": true,
+        "use_fp16": false
+      },
+      "color": "#164",
+      "bgcolor": "#275"
+    },
+    {
+      "id": 36,
+      "type": "SeamlessFlattenNormal",
+      "pos": [
+        -214.0071947847097,
+        2459.9537470061737
+      ],
+      "size": [
+        470,
+        130
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "normal",
+          "type": "IMAGE",
+          "link": 24
+        }
+      ],
+      "outputs": [
+        {
+          "name": "normal",
+          "type": "IMAGE",
+          "links": [
+            25,
+            26
+          ]
+        }
+      ],
+      "title": "整平全局倾斜（坡度交给 bump_strength 一个旋钮）",
+      "properties": {
+        "Node name for S&R": "SeamlessFlattenNormal"
+      },
+      "widgets_values": [
+        1,
+        true
+      ],
+      "widgets_values_named": {
+        "relief_scale": 1,
+        "flatten": true
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 44,
+      "type": "SaveImage",
+      "pos": [
+        3221.5589752878973,
+        2211.269722013536
+      ],
+      "size": [
+        500,
+        500
+      ],
+      "flags": {},
+      "order": 24,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 25
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "主几何：DSINE 整平后法线（环绕 1.12/1.64）",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/pbr_v2/sand_v2_normal_dsine"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/pbr_v2/sand_v2_normal_dsine"
+      }
+    },
+    {
+      "id": 38,
+      "type": "SeamlessFlattenNormal",
+      "pos": [
+        1224.6991676931561,
+        1952.265383507402
+      ],
+      "size": [
+        470,
+        130
+      ],
+      "flags": {},
+      "order": 22,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "normal",
+          "type": "IMAGE",
+          "link": 21
+        }
+      ],
+      "outputs": [
+        {
+          "name": "normal",
+          "type": "IMAGE",
+          "links": [
+            22
+          ]
+        }
+      ],
+      "title": "对照支路：MoGe 同样整平（其余条件一致才能比）",
+      "properties": {
+        "Node name for S&R": "SeamlessFlattenNormal"
+      },
+      "widgets_values": [
+        1,
+        true
+      ],
+      "widgets_values_named": {
+        "relief_scale": 1,
+        "flatten": true
+      },
+      "color": "#533",
+      "bgcolor": "#754"
+    },
+    {
+      "id": 37,
+      "type": "SaveImage",
+      "pos": [
+        1725.6310098165823,
+        1555.8471770059339
+      ],
+      "size": [
+        470,
+        330
+      ],
+      "flags": {},
+      "order": 21,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 20
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "对照：MoGe 直出法线（未整平，环绕 2.70/3.07）",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/pbr_v2/sand_v2_normal_moge_raw"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/pbr_v2/sand_v2_normal_moge_raw"
+      }
+    },
+    {
+      "id": 39,
+      "type": "SaveImage",
+      "pos": [
+        1725.6310098165823,
+        1950.7688116860857
+      ],
+      "size": [
+        470,
+        330
+      ],
+      "flags": {},
+      "order": 27,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 22
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "对照：MoGe 整平后法线",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/pbr_v2/sand_v2_normal_moge"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/pbr_v2/sand_v2_normal_moge"
+      }
+    },
+    {
+      "id": 40,
+      "type": "SeamlessHeightFromNormal",
+      "pos": [
+        517.9531864835633,
+        2459.9537470061737
+      ],
+      "size": [
+        470,
+        130
+      ],
+      "flags": {},
+      "order": 25,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "normal",
+          "type": "IMAGE",
+          "link": 26
+        }
+      ],
+      "outputs": [
+        {
+          "name": "height",
+          "type": "IMAGE",
+          "links": [
+            27,
+            28,
+            30,
+            34,
+            35
+          ]
+        }
+      ],
+      "title": "周期泊松积分 + 低频剔除 → height（严格单调，无平台）",
+      "properties": {
+        "Node name for S&R": "SeamlessHeightFromNormal"
+      },
+      "widgets_values": [
+        96,
+        false,
+        0.15
+      ],
+      "widgets_values_named": {
+        "low_freq_radius": 96,
+        "invert": false,
+        "headroom": 0.15
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 41,
+      "type": "SaveImage",
+      "pos": [
+        3221.5589752878973,
+        1096.51765589782
+      ],
+      "size": [
+        500,
+        500
+      ],
+      "flags": {},
+      "order": 28,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 27
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "height",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/pbr_v2/sand_v2_height"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/pbr_v2/sand_v2_height"
+      }
+    },
+    {
+      "id": 42,
+      "type": "TilePreview",
+      "pos": [
+        2643.527973305672,
+        3413.364170425934
+      ],
+      "size": [
+        470,
+        100
+      ],
+      "flags": {},
+      "order": 29,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 28
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            29
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "TilePreview"
+      },
+      "widgets_values": [
+        2,
+        2
+      ],
+      "widgets_values_named": {
+        "tiles_x": 2,
+        "tiles_y": 2
+      }
+    },
+    {
+      "id": 43,
+      "type": "SaveImage",
+      "pos": [
+        2643.527973305672,
+        3557.742528605548
+      ],
+      "size": [
+        470,
+        420
+      ],
+      "flags": {},
+      "order": 33,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 29
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "2x2 自检 · height",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/pbr_v2/sand_v2_height_tilecheck_2x2"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/pbr_v2/sand_v2_height_tilecheck_2x2"
+      }
+    },
+    {
+      "id": 50,
+      "type": "SeamlessNormalFromHeight",
+      "pos": [
+        1074.398868922145,
+        2465.790684671283
+      ],
+      "size": [
+        470,
+        140
+      ],
+      "flags": {},
+      "order": 30,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "height",
+          "type": "IMAGE",
+          "link": 30
+        }
+      ],
+      "outputs": [
+        {
+          "name": "normal",
+          "type": "IMAGE",
+          "links": [
+            31,
+            32
+          ]
+        }
+      ],
+      "title": "主法线：从 height 重导（31.4 补偿 headroom 的 0.70×）",
+      "properties": {
+        "Node name for S&R": "SeamlessNormalFromHeight"
+      },
+      "widgets_values": [
+        31.4,
+        false
+      ],
+      "widgets_values_named": {
+        "bump_strength": 31.4,
+        "directx": false
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 54,
+      "type": "SaveImage",
+      "pos": [
+        2639.1172051089366,
+        1082.7347858752807
+      ],
+      "size": [
+        500,
+        500
+      ],
+      "flags": {},
+      "order": 34,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 31
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "normal（主输出 = 严格四方连续）",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/pbr_v2/sand_v2_normal"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/pbr_v2/sand_v2_normal"
+      }
+    },
+    {
+      "id": 55,
+      "type": "TilePreview",
+      "pos": [
+        3250.4977521162186,
+        3411.397266180906
+      ],
+      "size": [
+        470,
+        100
+      ],
+      "flags": {},
+      "order": 35,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 32
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            33
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "TilePreview"
+      },
+      "widgets_values": [
+        2,
+        2
+      ],
+      "widgets_values_named": {
+        "tiles_x": 2,
+        "tiles_y": 2
+      }
+    },
+    {
+      "id": 56,
+      "type": "SaveImage",
+      "pos": [
+        3250.4977521162186,
+        3573.520959763728
+      ],
+      "size": [
+        470,
+        400
+      ],
+      "flags": {},
+      "order": 39,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 33
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "2x2 自检 · normal",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/pbr_v2/sand_v2_normal_tilecheck_2x2"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/pbr_v2/sand_v2_normal_tilecheck_2x2"
+      }
+    },
+    {
+      "id": 60,
+      "type": "SeamlessAOFromHeight",
+      "pos": [
+        1074.398868922145,
+        2756.7504959144194
+      ],
+      "size": [
+        470,
+        160
+      ],
+      "flags": {},
+      "order": 31,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "height",
+          "type": "IMAGE",
+          "link": 34
+        }
+      ],
+      "outputs": [
+        {
+          "name": "ao",
+          "type": "IMAGE",
+          "links": [
+            36,
+            38
+          ]
+        }
+      ],
+      "title": "AO（多尺度空腔）",
+      "properties": {
+        "Node name for S&R": "SeamlessAOFromHeight"
+      },
+      "widgets_values": [
+        24,
+        4,
+        1,
+        1,
+        2
+      ],
+      "widgets_values_named": {
+        "radius": 24,
+        "scales": 4,
+        "strength": 1,
+        "gamma": 1,
+        "smooth": 2
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 61,
+      "type": "SeamlessRoughnessFromHeight",
+      "pos": [
+        1074.398868922145,
+        2998.3383226480373
+      ],
+      "size": [
+        470,
+        180
+      ],
+      "flags": {},
+      "order": 32,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "height",
+          "type": "IMAGE",
+          "link": 35
+        }
+      ],
+      "outputs": [
+        {
+          "name": "roughness",
+          "type": "IMAGE",
+          "links": [
+            37,
+            39
+          ]
+        }
+      ],
+      "title": "roughness（高度微起伏代理量）",
+      "properties": {
+        "Node name for S&R": "SeamlessRoughnessFromHeight"
+      },
+      "widgets_values": [
+        12,
+        0.55,
+        0.95,
+        1,
+        false
+      ],
+      "widgets_values_named": {
+        "window": 12,
+        "min_roughness": 0.55,
+        "max_roughness": 0.95,
+        "gamma": 1,
+        "invert": false
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 62,
+      "type": "PackPBRChannels",
+      "pos": [
+        1655.6952935385907,
+        2758.895674010195
+      ],
+      "size": [
+        470,
+        120
+      ],
+      "flags": {},
+      "order": 37,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "ao",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 36
+        },
+        {
+          "name": "roughness",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 37
+        },
+        {
+          "name": "metalness",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "orm",
+          "type": "IMAGE",
+          "links": [
+            40,
+            41
+          ]
+        }
+      ],
+      "title": "ORM（砂石是电介质 → metal = 0）",
+      "properties": {
+        "Node name for S&R": "PackPBRChannels"
+      },
+      "widgets_values": [
+        0
+      ],
+      "widgets_values_named": {
+        "metalness_value": 0
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 63,
+      "type": "SaveImage",
+      "pos": [
+        3221.5589752878973,
+        1658.9004088291763
+      ],
+      "size": [
+        500,
+        500
+      ],
+      "flags": {},
+      "order": 36,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 38
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "ao / roughness / orm",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/pbr_v2/sand_v2_ao"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/pbr_v2/sand_v2_ao"
+      }
+    },
+    {
+      "id": 64,
+      "type": "SaveImage",
+      "pos": [
+        2639.1172051089366,
+        1639.1096919609297
+      ],
+      "size": [
+        500,
+        500
+      ],
+      "flags": {},
+      "order": 38,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 39
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/pbr_v2/sand_v2_roughness"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/pbr_v2/sand_v2_roughness"
+      }
+    },
+    {
+      "id": 65,
+      "type": "SaveImage",
+      "pos": [
+        2639.1172051089366,
+        2204.29376408715
+      ],
+      "size": [
+        500,
+        500
+      ],
+      "flags": {},
+      "order": 40,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 40
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/pbr_v2/sand_v2_orm"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/pbr_v2/sand_v2_orm"
+      }
+    },
+    {
+      "id": 66,
+      "type": "TilePreview",
+      "pos": [
+        2643.527973305672,
+        4038.423123037799
+      ],
+      "size": [
+        470,
+        100
+      ],
+      "flags": {},
+      "order": 41,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 41
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            42
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "TilePreview"
+      },
+      "widgets_values": [
+        2,
+        2
+      ],
+      "widgets_values_named": {
+        "tiles_x": 2,
+        "tiles_y": 2
+      }
+    },
+    {
+      "id": 67,
+      "type": "SaveImage",
+      "pos": [
+        2646.4246171030386,
+        4204.9801413863925
+      ],
+      "size": [
+        470,
+        420
+      ],
+      "flags": {},
+      "order": 42,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 42
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "2x2 自检 · orm",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/pbr_v2/sand_v2_orm_tilecheck_2x2"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/pbr_v2/sand_v2_orm_tilecheck_2x2"
+      }
+    },
+    {
+      "id": 70,
+      "type": "SeamlessDelightAlbedo",
+      "pos": [
+        417.32454817209174,
+        3351.6864230598408
+      ],
+      "size": [
+        470,
+        130
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 43
+        }
+      ],
+      "outputs": [
+        {
+          "name": "albedo",
+          "type": "IMAGE",
+          "links": [
+            44,
+            45
+          ]
+        }
+      ],
+      "title": "去光照 albedo（低频平场除法）",
+      "properties": {
+        "Node name for S&R": "SeamlessDelightAlbedo"
+      },
+      "widgets_values": [
+        128,
+        1,
+        true
+      ],
+      "widgets_values_named": {
+        "radius": 128,
+        "amount": 1,
+        "preserve_mean": true
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 71,
+      "type": "SaveImage",
+      "pos": [
+        2639.1172051089366,
+        2773.031555221643
+      ],
+      "size": [
+        500,
+        500
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 44
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "albedo",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/pbr_v2/sand_v2_albedo"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/pbr_v2/sand_v2_albedo"
+      }
+    },
+    {
+      "id": 72,
+      "type": "TilePreview",
+      "pos": [
+        3250.4977521162186,
+        4047.61557751719
+      ],
+      "size": [
+        470,
+        100
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 45
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            46
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "TilePreview"
+      },
+      "widgets_values": [
+        2,
+        2
+      ],
+      "widgets_values_named": {
+        "tiles_x": 2,
+        "tiles_y": 2
+      }
+    },
+    {
+      "id": 73,
+      "type": "SaveImage",
+      "pos": [
+        3249.0494302175352,
+        4202.6518096671625
+      ],
+      "size": [
+        470,
+        420
+      ],
+      "flags": {},
+      "order": 26,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 46
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "2x2 自检 · albedo",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/pbr_v2/sand_v2_albedo_tilecheck_2x2"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/pbr_v2/sand_v2_albedo_tilecheck_2x2"
+      }
+    },
+    {
+      "id": 74,
+      "type": "PreviewImage",
+      "pos": [
+        -116.95175229365209,
+        1293.8113361811281
+      ],
+      "size": [
+        330,
+        26
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 47
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "2x2 自检 · 渲染图",
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      }
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "MODEL"
+    ],
+    [
+      2,
+      1,
+      1,
+      2,
+      1,
+      "CLIP"
+    ],
+    [
+      3,
+      2,
+      1,
+      3,
+      0,
+      "CLIP"
+    ],
+    [
+      4,
+      2,
+      1,
+      4,
+      0,
+      "CLIP"
+    ],
+    [
+      5,
+      2,
+      0,
+      6,
+      0,
+      "MODEL"
+    ],
+    [
+      6,
+      6,
+      0,
+      7,
+      0,
+      "MODEL"
+    ],
+    [
+      7,
+      3,
+      0,
+      7,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      8,
+      4,
+      0,
+      7,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      9,
+      5,
+      0,
+      7,
+      3,
+      "LATENT"
+    ],
+    [
+      10,
+      7,
+      0,
+      8,
+      0,
+      "LATENT"
+    ],
+    [
+      11,
+      1,
+      2,
+      8,
+      1,
+      "VAE"
+    ],
+    [
+      12,
+      8,
+      0,
+      20,
+      0,
+      "IMAGE"
+    ],
+    [
+      13,
+      8,
+      0,
+      21,
+      0,
+      "IMAGE"
+    ],
+    [
+      15,
+      30,
+      0,
+      31,
+      0,
+      "MOGE_MODEL"
+    ],
+    [
+      16,
+      8,
+      0,
+      31,
+      1,
+      "IMAGE"
+    ],
+    [
+      17,
+      31,
+      0,
+      32,
+      0,
+      "MOGE_GEOMETRY"
+    ],
+    [
+      18,
+      31,
+      0,
+      33,
+      0,
+      "MOGE_GEOMETRY"
+    ],
+    [
+      19,
+      33,
+      0,
+      34,
+      0,
+      "IMAGE"
+    ],
+    [
+      20,
+      32,
+      0,
+      37,
+      0,
+      "IMAGE"
+    ],
+    [
+      21,
+      32,
+      0,
+      38,
+      0,
+      "IMAGE"
+    ],
+    [
+      22,
+      38,
+      0,
+      39,
+      0,
+      "IMAGE"
+    ],
+    [
+      23,
+      8,
+      0,
+      35,
+      0,
+      "IMAGE"
+    ],
+    [
+      24,
+      35,
+      0,
+      36,
+      0,
+      "IMAGE"
+    ],
+    [
+      25,
+      36,
+      0,
+      44,
+      0,
+      "IMAGE"
+    ],
+    [
+      26,
+      36,
+      0,
+      40,
+      0,
+      "IMAGE"
+    ],
+    [
+      27,
+      40,
+      0,
+      41,
+      0,
+      "IMAGE"
+    ],
+    [
+      28,
+      40,
+      0,
+      42,
+      0,
+      "IMAGE"
+    ],
+    [
+      29,
+      42,
+      0,
+      43,
+      0,
+      "IMAGE"
+    ],
+    [
+      30,
+      40,
+      0,
+      50,
+      0,
+      "IMAGE"
+    ],
+    [
+      31,
+      50,
+      0,
+      54,
+      0,
+      "IMAGE"
+    ],
+    [
+      32,
+      50,
+      0,
+      55,
+      0,
+      "IMAGE"
+    ],
+    [
+      33,
+      55,
+      0,
+      56,
+      0,
+      "IMAGE"
+    ],
+    [
+      34,
+      40,
+      0,
+      60,
+      0,
+      "IMAGE"
+    ],
+    [
+      35,
+      40,
+      0,
+      61,
+      0,
+      "IMAGE"
+    ],
+    [
+      36,
+      60,
+      0,
+      62,
+      0,
+      "IMAGE"
+    ],
+    [
+      37,
+      61,
+      0,
+      62,
+      1,
+      "IMAGE"
+    ],
+    [
+      38,
+      60,
+      0,
+      63,
+      0,
+      "IMAGE"
+    ],
+    [
+      39,
+      61,
+      0,
+      64,
+      0,
+      "IMAGE"
+    ],
+    [
+      40,
+      62,
+      0,
+      65,
+      0,
+      "IMAGE"
+    ],
+    [
+      41,
+      62,
+      0,
+      66,
+      0,
+      "IMAGE"
+    ],
+    [
+      42,
+      66,
+      0,
+      67,
+      0,
+      "IMAGE"
+    ],
+    [
+      43,
+      8,
+      0,
+      70,
+      0,
+      "IMAGE"
+    ],
+    [
+      44,
+      70,
+      0,
+      71,
+      0,
+      "IMAGE"
+    ],
+    [
+      45,
+      70,
+      0,
+      72,
+      0,
+      "IMAGE"
+    ],
+    [
+      46,
+      72,
+      0,
+      73,
+      0,
+      "IMAGE"
+    ],
+    [
+      47,
+      21,
+      0,
+      74,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "A · 生成受光渲染图（环面 padding）",
+      "bounding": [
+        -2710,
+        1020,
+        1580,
+        906
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "B · 几何反演（MoGe → height → normal/AO/rough/ORM）",
+      "bounding": [
+        360,
+        1020,
+        1907.6403149238026,
+        2546.9743374297
+      ],
+      "color": "#88A",
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "C · 去光照 albedo",
+      "bounding": [
+        372.2168753997193,
+        3290,
+        547.2976565827964,
+        211.97844668900143
+      ],
+      "color": "#A88",
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "2x2自检",
+      "bounding": [
+        2633.527973305672,
+        3343.364170425934,
+        1104.7797587185787,
+        1327.5857571643721
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 5,
+      "title": "输出",
+      "bounding": [
+        2629.1172051089366,
+        1012.7347858752807,
+        1102.4417701789607,
+        2270.296769346363
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.13660269107301548,
+      "offset": [
+        4467.269560552139,
+        1026.7259652104096
+      ]
+    },
+    "frontendVersion": "1.53.6",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}

@@ -1,0 +1,9 @@
+[project]
+name = "comfyui-seamless-texture"
+version = "1.3.0"
+description = "Seamless (tileable) textures end to end: circular-padding sampling for the UNet and VAE, convolutional normal estimation (DSINE) plus periodic Poisson integration to recover height from a lit render, strictly-monotone height normalisation that cannot produce flat plateaus, circular-safe derivation of normal / AO / roughness / packed ORM, and periodic-extension resize and super resolution"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.comfy]

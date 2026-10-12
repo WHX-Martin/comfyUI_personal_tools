@@ -1,0 +1,731 @@
+{
+  "id": "0c330673-5d46-495a-8baf-e3e6b9b76335",
+  "revision": 0,
+  "last_node_id": 12,
+  "last_link_id": 14,
+  "nodes": [
+    {
+      "id": 12,
+      "type": "MarkdownNote",
+      "pos": [
+        -1155.2176030669723,
+        204.52127325266108
+      ],
+      "size": [
+        560,
+        760
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "读我 · 参数来龙去脉",
+      "properties": {
+        "Node name for S&R": "MarkdownNote"
+      },
+      "widgets_values": [
+        "# 沙砾材质 albedo · 四方连续（circular padding）\n\n## 这条链路在做什么\n\n`Seamless Model Padding` 把 UNet 里每个卷积的 padding 从 zeros 换成 **circular**，\n特征图因此成为**环面**：第 0 列的左邻居是第 W-1 列。模型不再需要画\"边界层\"，\n输出就是环面上的函数，平铺时**没有接缝**（不是\"缝很淡\"，是数学上不存在）。\n`Seamless VAE Decode` 做同一件事（解码器），再切掉一圈 margin。\n\n## 触发词 —— 别改\n\n`mtrlx` + 七个核心 tag 在你训练时 **30/30 张图都出现**，LoRA 是绑死这套 caption\n前缀的。删掉任何一个，效果都会明显变弱。只有末尾的材质描述可以换：\n\n- 颜色：pale khaki sand / warm beige sand / rich medium brown sand /\n  near-white ivory sand / grey-beige coarse sand / sage grey-green sandy ground /\n  dark ochre yellow sand / olive grey-green silty ground\n- 颗粒：fine even grain / very fine grain / medium rough grain /\n  coarse pebbly sand / dense gravel aggregate / scattered dark mineral grains /\n  soft dune ripple waves / subtle mottling / coarse speckled grain\n\n组合示例：`... small scale pattern, warm beige sand, coarse pebbly sand`\n\n## 怎么自检\n\n`2x2 tile check` 那个 SaveImage 是重复 2x2 的预览。平铺后看不到十字缝 = 通过。\n单张图看不出问题，只有平铺才暴露 —— 所以每次出图都存两张。\n\n## A/B 对照\n\n把 `Seamless Model Padding` 的 `mode` 从 `circular` 改成 `off` 再跑一次（seed 是固定\n的，所以是严格同种子对照），2x2 预览上会出现明显的十字缝。这是验证 padding 真的\n生效、而不是\"恰好没缝\"的最直接证据。\n\n## 训练侧的已知限制\n\n元数据显示数据集只有 **30 张唯一图**（`10_sand`，n_repeats=10）→ 300 张训练图、\n4 epoch / 2000 步，dim 32 / alpha 16。30 张唯一图对 SDXL 来说偏少，出图的**多样性**\n会受限（容易反复出同几种颗粒形态）。如果发现材质单一，问题在数据集而不在这条链路，\n后续要补图重训。\n\n## 后续：normal / roughness\n\n同一条链路换 prompt 即可（albedo → normal map / roughness），保持 `Seamless Model\nPadding` 与 `Seamless VAE Decode` 不动，三张贴图的平铺周期才对齐。\n"
+      ],
+      "widgets_values_named": {
+        "text": "# 沙砾材质 albedo · 四方连续（circular padding）\n\n## 这条链路在做什么\n\n`Seamless Model Padding` 把 UNet 里每个卷积的 padding 从 zeros 换成 **circular**，\n特征图因此成为**环面**：第 0 列的左邻居是第 W-1 列。模型不再需要画\"边界层\"，\n输出就是环面上的函数，平铺时**没有接缝**（不是\"缝很淡\"，是数学上不存在）。\n`Seamless VAE Decode` 做同一件事（解码器），再切掉一圈 margin。\n\n## 触发词 —— 别改\n\n`mtrlx` + 七个核心 tag 在你训练时 **30/30 张图都出现**，LoRA 是绑死这套 caption\n前缀的。删掉任何一个，效果都会明显变弱。只有末尾的材质描述可以换：\n\n- 颜色：pale khaki sand / warm beige sand / rich medium brown sand /\n  near-white ivory sand / grey-beige coarse sand / sage grey-green sandy ground /\n  dark ochre yellow sand / olive grey-green silty ground\n- 颗粒：fine even grain / very fine grain / medium rough grain /\n  coarse pebbly sand / dense gravel aggregate / scattered dark mineral grains /\n  soft dune ripple waves / subtle mottling / coarse speckled grain\n\n组合示例：`... small scale pattern, warm beige sand, coarse pebbly sand`\n\n## 怎么自检\n\n`2x2 tile check` 那个 SaveImage 是重复 2x2 的预览。平铺后看不到十字缝 = 通过。\n单张图看不出问题，只有平铺才暴露 —— 所以每次出图都存两张。\n\n## A/B 对照\n\n把 `Seamless Model Padding` 的 `mode` 从 `circular` 改成 `off` 再跑一次（seed 是固定\n的，所以是严格同种子对照），2x2 预览上会出现明显的十字缝。这是验证 padding 真的\n生效、而不是\"恰好没缝\"的最直接证据。\n\n## 训练侧的已知限制\n\n元数据显示数据集只有 **30 张唯一图**（`10_sand`，n_repeats=10）→ 300 张训练图、\n4 epoch / 2000 步，dim 32 / alpha 16。30 张唯一图对 SDXL 来说偏少，出图的**多样性**\n会受限（容易反复出同几种颗粒形态）。如果发现材质单一，问题在数据集而不在这条链路，\n后续要补图重训。\n\n## 后续：normal / roughness\n\n同一条链路换 prompt 即可（albedo → normal map / roughness），保持 `Seamless Model\nPadding` 与 `Seamless VAE Decode` 不动，三张贴图的平铺周期才对齐。\n"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 1,
+      "type": "CheckpointLoaderSimple",
+      "pos": [
+        -560,
+        190
+      ],
+      "size": [
+        350,
+        110
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            1
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            2
+          ]
+        },
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            11
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CheckpointLoaderSimple"
+      },
+      "widgets_values": [
+        "sd_xl_base_1.0.safetensors"
+      ],
+      "widgets_values_named": {
+        "ckpt_name": "sd_xl_base_1.0.safetensors"
+      }
+    },
+    {
+      "id": 2,
+      "type": "LoraLoader",
+      "pos": [
+        -560,
+        380
+      ],
+      "size": [
+        350,
+        140
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            5
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            3,
+            4
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoraLoader"
+      },
+      "widgets_values": [
+        "sdxl-texture-sand-lora-v1-000004.safetensors",
+        1,
+        1
+      ],
+      "widgets_values_named": {
+        "lora_name": "sdxl-texture-sand-lora-v1-000004.safetensors",
+        "strength_model": 1,
+        "strength_clip": 1
+      }
+    },
+    {
+      "id": 3,
+      "type": "CLIPTextEncode",
+      "pos": [
+        -120,
+        170
+      ],
+      "size": [
+        480,
+        240
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            7
+          ]
+        }
+      ],
+      "title": "Positive · 触发词 + 材质描述",
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "mtrlx, seamless tileable pbr texture, seamless flat surface, flat top-down view, even lighting, fine detailed, high frequency texture, small scale pattern, pale khaki sand, fine even grain"
+      ],
+      "widgets_values_named": {
+        "text": "mtrlx, seamless tileable pbr texture, seamless flat surface, flat top-down view, even lighting, fine detailed, high frequency texture, small scale pattern, pale khaki sand, fine even grain"
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 4,
+      "type": "CLIPTextEncode",
+      "pos": [
+        -120,
+        470
+      ],
+      "size": [
+        480,
+        240
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            8
+          ]
+        }
+      ],
+      "title": "Negative",
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "blurry, lowres, out of focus, jpeg artifacts, watermark, text, signature, logo, perspective view, side view, harsh shadows, cast shadows, vignette, lighting gradient, depth of field, bokeh, flat solid color, cartoon, painting, tiling seam, visible grid, tile border"
+      ],
+      "widgets_values_named": {
+        "text": "blurry, lowres, out of focus, jpeg artifacts, watermark, text, signature, logo, perspective view, side view, harsh shadows, cast shadows, vignette, lighting gradient, depth of field, bokeh, flat solid color, cartoon, painting, tiling seam, visible grid, tile border"
+      },
+      "color": "#223",
+      "bgcolor": "#335"
+    },
+    {
+      "id": 5,
+      "type": "EmptyLatentImage",
+      "pos": [
+        -120,
+        807.6975660775543
+      ],
+      "size": [
+        480,
+        120
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            9
+          ]
+        }
+      ],
+      "title": "Tile size · SDXL 原生 1024",
+      "properties": {
+        "Node name for S&R": "EmptyLatentImage"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        1
+      ],
+      "widgets_values_named": {
+        "width": 1024,
+        "height": 1024,
+        "batch_size": 1
+      },
+      "color": "#323",
+      "bgcolor": "#535"
+    },
+    {
+      "id": 6,
+      "type": "SeamlessModelPadding",
+      "pos": [
+        -123.76975660775541,
+        1043.301476041946
+      ],
+      "size": [
+        480,
+        100
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": [
+            6
+          ]
+        }
+      ],
+      "title": "Seamless Model Padding · 改的就是这里",
+      "properties": {
+        "Node name for S&R": "SeamlessModelPadding"
+      },
+      "widgets_values": [
+        "circular"
+      ],
+      "widgets_values_named": {
+        "mode": "circular"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 7,
+      "type": "KSampler",
+      "pos": [
+        460,
+        470
+      ],
+      "size": [
+        300,
+        290
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 6
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 7
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 8
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            10
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "KSampler"
+      },
+      "widgets_values": [
+        20261010,
+        "fixed",
+        30,
+        6.5,
+        "dpmpp_2m",
+        "karras",
+        1
+      ],
+      "widgets_values_named": {
+        "seed": 20261010,
+        "control_after_generate": "fixed",
+        "steps": 30,
+        "cfg": 6.5,
+        "sampler_name": "dpmpp_2m",
+        "scheduler": "karras",
+        "denoise": 1
+      }
+    },
+    {
+      "id": 8,
+      "type": "SeamlessVAEDecode",
+      "pos": [
+        860,
+        470
+      ],
+      "size": [
+        330,
+        110
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 10
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 11
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            12,
+            13
+          ]
+        }
+      ],
+      "title": "Seamless VAE Decode",
+      "properties": {
+        "Node name for S&R": "SeamlessVAEDecode"
+      },
+      "widgets_values": [
+        8
+      ],
+      "widgets_values_named": {
+        "margin": 8
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 9,
+      "type": "SaveImage",
+      "pos": [
+        1311.2894786010756,
+        154.94736186523266
+      ],
+      "size": [
+        560,
+        640
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 12
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "Albedo · 单张（看不出问题）",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_albedo_seamless"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_albedo_seamless"
+      }
+    },
+    {
+      "id": 10,
+      "type": "TilePreview",
+      "pos": [
+        819.5693603818233,
+        828.4210824307603
+      ],
+      "size": [
+        330,
+        110
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 13
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            14
+          ]
+        }
+      ],
+      "title": "Tile Preview · 2x2",
+      "properties": {
+        "Node name for S&R": "TilePreview"
+      },
+      "widgets_values": [
+        2,
+        2
+      ],
+      "widgets_values_named": {
+        "tiles_x": 2,
+        "tiles_y": 2
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 11,
+      "type": "SaveImage",
+      "pos": [
+        1311.745619150614,
+        847.273523533441
+      ],
+      "size": [
+        560,
+        640
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 14
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "2x2 tile check · 看这张",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "textures/sand_albedo_tilecheck_2x2"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "textures/sand_albedo_tilecheck_2x2"
+      }
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "MODEL"
+    ],
+    [
+      2,
+      1,
+      1,
+      2,
+      1,
+      "CLIP"
+    ],
+    [
+      3,
+      2,
+      1,
+      3,
+      0,
+      "CLIP"
+    ],
+    [
+      4,
+      2,
+      1,
+      4,
+      0,
+      "CLIP"
+    ],
+    [
+      5,
+      2,
+      0,
+      6,
+      0,
+      "MODEL"
+    ],
+    [
+      6,
+      6,
+      0,
+      7,
+      0,
+      "MODEL"
+    ],
+    [
+      7,
+      3,
+      0,
+      7,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      8,
+      4,
+      0,
+      7,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      9,
+      5,
+      0,
+      7,
+      3,
+      "LATENT"
+    ],
+    [
+      10,
+      7,
+      0,
+      8,
+      0,
+      "LATENT"
+    ],
+    [
+      11,
+      1,
+      2,
+      8,
+      1,
+      "VAE"
+    ],
+    [
+      12,
+      8,
+      0,
+      9,
+      0,
+      "IMAGE"
+    ],
+    [
+      13,
+      8,
+      0,
+      10,
+      0,
+      "IMAGE"
+    ],
+    [
+      14,
+      10,
+      0,
+      11,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "Prompt（mtrlx = 触发词）",
+      "bounding": [
+        -140,
+        110,
+        520,
+        620
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "Tile size",
+      "bounding": [
+        -140,
+        740,
+        521.8848783038777,
+        193.92780946979883
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "Seamless（padding → circular）",
+      "bounding": [
+        -142.82731745581657,
+        961.4673226853097,
+        521.8848783038777,
+        224.085862331842
+      ],
+      "color": "#88A",
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "Self-check",
+      "bounding": [
+        779.8723821063015,
+        750.7336613426546,
+        421.5151086223898,
+        207.38439936362806
+      ],
+      "color": "#A88",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.7972024500000012,
+      "offset": [
+        -539.269544376347,
+        5.529836960090909
+      ]
+    },
+    "frontendVersion": "1.53.6",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}

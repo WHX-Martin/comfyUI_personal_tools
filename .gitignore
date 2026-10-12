@@ -59,3 +59,6 @@ desktop.ini
 # input/
 # custom_nodes/
 # user/
+
+# --- 第三方节点包(带自己的 .git，不 vendor 进本仓库) ---
+custom_nodes/comfyui-stable-materials/
